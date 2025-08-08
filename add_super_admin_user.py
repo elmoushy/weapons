@@ -32,8 +32,8 @@ def create_super_admin():
     email = "admintest@gmail.com"
     auth_type = "regular"
     password = "Password781#"
-    first_name = "Seif"
-    last_name = "Eldein"
+    first_name = "Admin"
+    last_name = "Test"
     role = "super_admin"
     
     print(f"Creating super_admin user: {email}")
