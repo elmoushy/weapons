@@ -39,8 +39,9 @@ def create_super_admin():
     print(f"Creating super_admin user: {email}")
     
     try:
-        # Check if user already exists
-        if User.objects.filter(email=email).exists():
+        # Check if user already exists using Oracle-compatible method
+        existing_user = User.objects.get_by_email(email)
+        if existing_user:
             print(f"❌ Error: User with email '{email}' already exists!")
             return False
         

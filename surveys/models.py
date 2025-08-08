@@ -1,16 +1,18 @@
 """
-Models for the surveys service with encryption support.
+Models for the surveys service with encryption support and Oracle compatibility.
 
 This module defines the database models for surveys, questions, responses,
-and sharing with role-based access control and AES-256 encryption.
+and sharing with role-based access control, AES-256 encryption, and
+Oracle-compatible hash fields for filtering.
 """
 
+import hashlib
+import logging
+import uuid
 from django.db import models
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from .encryption import surveys_data_encryption
-import logging
-import uuid
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -18,9 +20,12 @@ User = get_user_model()
 # Import Group model from authentication app
 try:
     from authentication.models import Group
+    from authentication.managers import OracleCompatibleSurveyManager, OracleCompatibleQuestionManager
 except ImportError:
     # Handle case where authentication app is not available
     Group = None
+    OracleCompatibleSurveyManager = models.Manager
+    OracleCompatibleQuestionManager = models.Manager
 
 
 class EncryptedTextField(models.TextField):
@@ -188,11 +193,21 @@ class Survey(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     
+    # Use Oracle-compatible manager
+    objects = OracleCompatibleSurveyManager()
+    
     class Meta:
         db_table = 'surveys_survey'
         verbose_name = 'Survey'
         verbose_name_plural = 'Surveys'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(
+                fields=['title_hash'],
+                name='surveys_title_hash_idx'
+                # Removed condition for Oracle compatibility
+            ),
+        ]
         # Indexes are already created by migrations 0001_initial and 0006_survey_end_date_survey_start_date_and_more
     
     def __str__(self):
@@ -241,8 +256,7 @@ class Survey(models.Model):
     def save(self, *args, **kwargs):
         """Override save to generate title hash and handle date logic"""
         if self.title:
-            import hashlib
-            self.title_hash = hashlib.sha256(self.title.encode()).hexdigest()
+            self.title_hash = hashlib.sha256(self.title.encode('utf-8')).hexdigest()
         
         # If only end_date is provided, set start_date to created_at (or now if updating)
         if self.end_date and not self.start_date:
@@ -300,12 +314,21 @@ class Question(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # Use Oracle-compatible manager
+    objects = OracleCompatibleQuestionManager()
+    
     class Meta:
         db_table = 'surveys_question'
         verbose_name = 'Question'
         verbose_name_plural = 'Questions'
         ordering = ['survey', 'order']
-        # Indexes are already created by migration 0001_initial
+        indexes = [
+            models.Index(
+                fields=['text_hash'],
+                name='questions_text_hash_idx'
+                # Removed condition for Oracle compatibility
+            ),
+        ]
     
     def __str__(self):
         return f"Q{self.order}: {self.text[:50]}..."
@@ -313,8 +336,7 @@ class Question(models.Model):
     def save(self, *args, **kwargs):
         """Override save to generate text hash for searching"""
         if self.text:
-            import hashlib
-            self.text_hash = hashlib.sha256(self.text.encode()).hexdigest()
+            self.text_hash = hashlib.sha256(self.text.encode('utf-8')).hexdigest()
         super().save(*args, **kwargs)
 
 

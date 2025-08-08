@@ -87,15 +87,15 @@ class CanSubmitResponse(BasePermission):
 
 class IsCreatorOrStaff(BasePermission):
     """
-    Only survey creator or staff can view responses and analytics.
+    Only survey creator or staff (admin/super_admin) can view responses and analytics.
     """
     
     def has_object_permission(self, request, view, obj):
         if hasattr(obj, 'creator'):
             # obj is Survey
-            return request.user == obj.creator or request.user.role in ['admin', 'manager']
+            return request.user == obj.creator or request.user.role in ['admin', 'super_admin', 'manager']
         elif hasattr(obj, 'survey'):
             # obj is Response
-            return request.user == obj.survey.creator or request.user.role in ['admin', 'manager']
+            return request.user == obj.survey.creator or request.user.role in ['admin', 'super_admin', 'manager']
         
         return False

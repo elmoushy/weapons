@@ -80,9 +80,13 @@ class AzureADAuthentication(authentication.BaseAuthentication):
             msg = 'Invalid token header. Token string should not contain invalid characters.'
             raise exceptions.AuthenticationFailed(msg)
             
-        return self.authenticate_credentials(token)
+        result = self.authenticate_credentials(token)
+        if result is None:
+            return None  # Allow other authentication methods to try
+        
+        return result
     
-    def authenticate_credentials(self, token: str) -> Tuple[AbstractBaseUser, str]:
+    def authenticate_credentials(self, token: str) -> Optional[Tuple[AbstractBaseUser, str]]:
         """
         Validate the JWT token and return the corresponding user.
         
@@ -101,8 +105,9 @@ class AzureADAuthentication(authentication.BaseAuthentication):
             kid = unverified_header.get('kid')
             
             if not kid:
-                logger.warning("JWT token missing 'kid' in header")
-                raise exceptions.AuthenticationFailed('Invalid token: missing key ID')
+                logger.debug("JWT token missing 'kid' in header - not an Azure AD token")
+                # Don't raise an exception here - return None to allow other auth methods
+                return None
             
             # Get JWKS keys and find the matching key
             jwks_keys = self._get_jwks_keys()

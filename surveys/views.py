@@ -144,13 +144,14 @@ class SurveyViewSet(ModelViewSet):
         
         # Regular users see their own surveys, shared surveys, public/auth surveys, and group-shared surveys
         user_groups = user.user_groups.values_list('group', flat=True)
+        # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
         return self.queryset.filter(
             Q(creator=user) |
             Q(shared_with=user) |
             Q(shared_with_groups__in=user_groups) |
             Q(visibility='PUBLIC') |
             Q(visibility='AUTH')
-        ).distinct()
+        ).distinct().defer('description')
     
     def list(self, request, *args, **kwargs):
         """List surveys with uniform response"""
@@ -1122,7 +1123,7 @@ class SurveyViewSet(ModelViewSet):
             if emails:
                 for email in emails:
                     try:
-                        user = User.objects.get(email=email)
+                        user = User.objects.get_by_email(email)
                         survey.shared_with.add(user)
                         shared_users.append({
                             'id': user.id,
@@ -1184,26 +1185,78 @@ class MySharedSurveysView(generics.ListAPIView):
         user = self.request.user
         
         # Build query for surveys accessible to this user
-        # 1. PUBLIC surveys (accessible to everyone) - include ALL PUBLIC surveys
-        # 2. AUTH surveys (accessible to all authenticated users) - include ALL AUTH surveys
+        # 1. PUBLIC surveys (accessible to everyone)
+        # 2. AUTH surveys (accessible to all authenticated users) 
         # 3. Private surveys where user is explicitly shared (exclude own private surveys)
-        # 4. Group surveys where user is in the shared groups (exclude own group surveys)
         
-        public_surveys = Q(visibility='PUBLIC')
-        auth_surveys = Q(visibility='AUTH')
-        private_shared_surveys = Q(visibility='PRIVATE', shared_with=user) & ~Q(creator=user)
-        user_groups = user.user_groups.values_list('group', flat=True)
-        group_shared_surveys = Q(visibility='GROUPS', shared_with_groups__in=user_groups) & ~Q(creator=user)
-        
-        return Survey.objects.filter(
-            public_surveys | auth_surveys | private_shared_surveys | group_shared_surveys,
-            deleted_at__isnull=True,
-            is_active=True  # Only show active surveys
-        ).distinct().select_related(
-            'creator'
-        ).prefetch_related(
-            'questions', 'shared_with', 'shared_with_groups'
-        )
+        try:
+            logger.info(f"Building queryset for user {user.email}")
+            
+            public_surveys = Q(visibility='PUBLIC')
+            auth_surveys = Q(visibility='AUTH')
+            
+            # Start with basic query that should always work
+            base_query = public_surveys | auth_surveys
+            
+            # Try to add private shared surveys
+            try:
+                private_shared_surveys = Q(visibility='PRIVATE', shared_with=user) & ~Q(creator=user)
+                base_query = base_query | private_shared_surveys
+                logger.debug(f"Added private shared surveys for {user.email}")
+            except Exception as e:
+                logger.warning(f"Could not query private shared surveys for {user.email}: {e}")
+            
+            # Try to add group surveys if user has groups
+            try:
+                user_groups = user.user_groups.values_list('group', flat=True)
+                if user_groups.exists():
+                    group_shared_surveys = Q(visibility='GROUPS', shared_with_groups__in=user_groups) & ~Q(creator=user)
+                    base_query = base_query | group_shared_surveys
+                    logger.debug(f"Added group shared surveys for {user.email}")
+                else:
+                    logger.debug(f"User {user.email} has no groups")
+            except Exception as e:
+                logger.warning(f"Could not query user groups for {user.email}: {e}")
+            
+            # Build the final queryset with minimal prefetch to avoid table issues
+            # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+            queryset = Survey.objects.filter(
+                base_query,
+                deleted_at__isnull=True,
+                is_active=True  # Only show active surveys
+            ).distinct().select_related('creator').defer('description')
+            
+            # Try to add prefetch_related safely
+            try:
+                queryset = queryset.prefetch_related('questions')
+                logger.debug(f"Added questions prefetch for {user.email}")
+            except Exception as e:
+                logger.warning(f"Could not prefetch questions for {user.email}: {e}")
+            
+            # Try to add shared_with prefetch safely
+            try:
+                queryset = queryset.prefetch_related('shared_with')
+                logger.debug(f"Added shared_with prefetch for {user.email}")
+            except Exception as e:
+                logger.warning(f"Could not prefetch shared_with for {user.email}: {e}")
+            
+            logger.info(f"Successfully built queryset for user {user.email}")
+            return queryset
+            
+        except Exception as e:
+            logger.error(f"Error building survey queryset for {user.email}: {e}")
+            # Fallback to minimal safe query
+            try:
+                # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+                return Survey.objects.filter(
+                    Q(visibility='PUBLIC') | Q(visibility='AUTH'),
+                    deleted_at__isnull=True,
+                    is_active=True
+                ).distinct().select_related('creator').defer('description')
+            except Exception as fallback_error:
+                logger.error(f"Even fallback query failed for {user.email}: {fallback_error}")
+                # Return empty queryset to prevent 500 errors
+                return Survey.objects.none()
     
     def list(self, request, *args, **kwargs):
         """List shared surveys with uniform response format"""
@@ -1699,7 +1752,7 @@ class SurveyResponseSubmissionView(APIView):
                 
                 # Also check if this email belongs to an authenticated user who already responded
                 try:
-                    user_with_email = User.objects.get(email=respondent_email)
+                    user_with_email = User.objects.get_by_email(respondent_email)
                     user_response = SurveyResponse.objects.filter(
                         survey=survey,
                         respondent=user_with_email
@@ -1993,11 +2046,11 @@ def bulk_operations(request):
                 status_code=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if user is admin (only admins can perform bulk operations)
-        if request.user.role not in ['admin']:
+        # Check if user is admin or super_admin (only these roles can perform bulk operations)
+        if request.user.role not in ['admin', 'super_admin']:
             return uniform_response(
                 success=False,
-                message="Only administrators can perform bulk operations",
+                message="Only administrators or super administrators can perform bulk operations",
                 status_code=status.HTTP_403_FORBIDDEN
             )
         
@@ -2007,8 +2060,8 @@ def bulk_operations(request):
             deleted_at__isnull=True
         )
         
-        # Filter to only surveys user can modify (creator or admin)
-        if request.user.role != 'admin':
+        # Filter to only surveys user can modify (creator or admin/super_admin)
+        if request.user.role not in ['admin', 'super_admin']:
             surveys = surveys.filter(creator=request.user)
         
         successful = 0
@@ -2080,7 +2133,7 @@ class AdminResponsesView(generics.ListAPIView):
     Admin API to return all survey responses across the system with full details.
     
     GET /api/surveys/admin/responses/
-    Access: Admin only
+    Access: Admin or Super Admin only
     """
     
     serializer_class = ResponseSerializer
@@ -2092,10 +2145,10 @@ class AdminResponsesView(generics.ListAPIView):
     ordering = ['-submitted_at']
     
     def get_queryset(self):
-        """Get all responses - admin only"""
+        """Get all responses - admin or super_admin only"""
         user = self.request.user
         
-        if not user.is_authenticated or user.role not in ['admin']:
+        if not user.is_authenticated or user.role not in ['admin', 'super_admin']:
             return SurveyResponse.objects.none()
         
         queryset = SurveyResponse.objects.all().select_related(
@@ -2125,11 +2178,11 @@ class AdminResponsesView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         """List all responses with export options"""
         try:
-            # Check admin permission
-            if not request.user.is_authenticated or request.user.role not in ['admin']:
+            # Check admin or super_admin permission
+            if not request.user.is_authenticated or request.user.role not in ['admin', 'super_admin']:
                 return uniform_response(
                     success=False,
-                    message="Admin access required",
+                    message="Admin or Super Admin access required",
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             
@@ -2284,10 +2337,10 @@ class AdminResponsesView(generics.ListAPIView):
 
 class AdminSurveyResponsesView(generics.ListAPIView):
     """
-    Admin API to get all responses for a specific survey with answers.
+    API to get all responses for a specific survey with answers.
     
     GET /api/surveys/admin/surveys/{survey_id}/responses/
-    Access: Admin only
+    Access: Admin, Super Admin, or Survey Creator only
     """
     
     serializer_class = ResponseSerializer
@@ -2298,32 +2351,44 @@ class AdminSurveyResponsesView(generics.ListAPIView):
     ordering = ['-submitted_at']
     
     def get_queryset(self):
-        """Get responses for specific survey - admin only"""
+        """Get responses for specific survey - admin, super_admin, or survey creator"""
         user = self.request.user
         
-        if not user.is_authenticated or user.role not in ['admin']:
+        if not user.is_authenticated:
             return SurveyResponse.objects.none()
         
         survey_id = self.kwargs.get('survey_id')
         survey = get_object_or_404(Survey, id=survey_id, deleted_at__isnull=True)
         
-        return survey.responses.all().select_related(
-            'respondent'
-        ).prefetch_related('answers__question')
+        # Allow access if user is admin, super_admin, or the survey creator
+        if user.role in ['admin', 'super_admin'] or user == survey.creator:
+            return survey.responses.all().select_related(
+                'respondent'
+            ).prefetch_related('answers__question')
+        
+        return SurveyResponse.objects.none()
     
     def list(self, request, *args, **kwargs):
         """List responses for specific survey with detailed answers"""
         try:
-            # Check admin permission
-            if not request.user.is_authenticated or request.user.role not in ['admin']:
+            # Check permission (admin, super_admin, or survey creator)
+            if not request.user.is_authenticated:
                 return uniform_response(
                     success=False,
-                    message="Admin access required",
-                    status_code=status.HTTP_403_FORBIDDEN
+                    message="Authentication required",
+                    status_code=status.HTTP_401_UNAUTHORIZED
                 )
             
             survey_id = self.kwargs.get('survey_id')
             survey = get_object_or_404(Survey, id=survey_id, deleted_at__isnull=True)
+            
+            # Check if user has permission to view responses
+            if not (request.user.role in ['admin', 'super_admin'] or request.user == survey.creator):
+                return uniform_response(
+                    success=False,
+                    message="Access denied. Only admins, super admins, or survey creators can view responses.",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             queryset = self.filter_queryset(self.get_queryset())
             page = self.paginate_queryset(queryset)

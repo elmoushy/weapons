@@ -62,8 +62,16 @@ class DualAuthentication(authentication.BaseAuthentication):
             True if it appears to be an Azure AD token, False otherwise
         """
         try:
-            # Decode without verification to check the token structure
-            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            # Decode header without verification to check for 'kid'
+            unverified_header = jwt.decode(token, options={"verify_signature": False, "verify_header": False})
+            header = jwt.get_unverified_header(token)
+            
+            # Azure AD tokens always have 'kid' in header
+            if 'kid' not in header:
+                return False
+            
+            # Decode payload without verification to check the token structure
+            unverified_payload = unverified_header
             
             # Azure AD tokens typically have these claims
             azure_claims = ['aud', 'iss', 'tid', 'oid']  # tid = tenant_id, oid = object_id
@@ -75,7 +83,7 @@ class DualAuthentication(authentication.BaseAuthentication):
             
             # Check for Azure-specific claims
             azure_claim_count = sum(1 for claim in azure_claims if claim in unverified_payload)
-            if azure_claim_count >= 2:  # If it has at least 2 Azure-specific claims
+            if azure_claim_count >= 3:  # Stricter check - need at least 3 Azure claims
                 return True
                 
             return False
@@ -267,7 +275,7 @@ class UniversalAuthentication(authentication.BaseAuthentication):
         except UnicodeError:
             return None
         
-        # Try both authentication methods simultaneously
+        # Try both authentication methods with better error handling
         regular_result = None
         azure_result = None
         
@@ -279,20 +287,27 @@ class UniversalAuthentication(authentication.BaseAuthentication):
                     user, validated_token = regular_result
                     logger.info(f"User {user.email} authenticated with regular JWT (universal)")
                     return regular_result
-            except Exception as e:
+            except (InvalidToken, TokenError) as e:
                 logger.debug(f"Regular JWT failed in universal auth: {e}")
+            except exceptions.AuthenticationFailed as e:
+                logger.debug(f"Regular JWT authentication failed: {e}")
+            except Exception as e:
+                logger.debug(f"Unexpected error in regular JWT: {e}")
         
-        # Try Azure AD authentication
+        # Try Azure AD authentication - it will return None if token doesn't have 'kid'
         try:
             azure_result = self.azure_ad_auth.authenticate(request)
             if azure_result is not None:
                 user, validated_token = azure_result
                 logger.info(f"User {user.email} authenticated with Azure AD (universal)")
                 return azure_result
+        except exceptions.AuthenticationFailed as e:
+            logger.debug(f"Azure AD authentication failed: {e}")
         except Exception as e:
-            logger.debug(f"Azure AD failed in universal auth: {e}")
+            logger.debug(f"Unexpected error in Azure AD auth: {e}")
         
-        # Both failed
+        # Both failed or returned None
+        logger.debug("Both authentication methods failed or returned None")
         return None
     
     def authenticate_header(self, request):

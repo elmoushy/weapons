@@ -29,12 +29,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-439pqxfk&5#kv53o1j!32rr3jjo+3=3(#&d%zj5i5=wu(mw#@w'
+SECRET_KEY = os.getenv('SECRET_KEY', '6hyk-x9f#r!16lez2i+ek+@!x(4!k6x9y-$^1h69_@y9ropte_')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*'] if DEBUG else []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*'] if DEBUG else [
+    os.getenv('ALLOWED_HOST', 'localhost'),
+    '127.0.0.1',
+    'localhost',
+]
 
 
 # Application definition
@@ -49,7 +53,7 @@ INSTALLED_APPS = [
     # Third party apps
     'rest_framework',
     'rest_framework_simplejwt',
-    'rest_framework_simplejwt.token_blacklist',
+    # 'rest_framework_simplejwt.token_blacklist',  # Disabled for Oracle compatibility
     'corsheaders',
     'django_extensions',
     "django_filters",
@@ -111,13 +115,9 @@ WSGI_APPLICATION = 'weaponpowercloud_backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# Use Oracle database by default
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    },
-    # Keep Oracle as backup for production
-    'oracle_backup': {
         'ENGINE': 'django.db.backends.oracle',
         'NAME': os.getenv('ORACLE_SERVICE', 'PROD'),
         'USER': os.getenv('ORACLE_USERNAME', 'APEX_PUBLIC_USER'),
@@ -125,10 +125,16 @@ DATABASES = {
         'HOST': os.getenv('ORACLE_HOST', '185.197.251.203'),
         'PORT': os.getenv('ORACLE_PORT', '1521'),
         'OPTIONS': {
-            # Modern python-oracledb doesn't support threaded option
+            # Oracle-specific connection options
         },
     }
 }
+
+# Oracle-specific settings
+SILENCED_SYSTEM_CHECKS = [
+    'fields.E007',  # Ignore Oracle field name length warnings
+    'models.W037',  # Ignore Oracle conditional index warnings
+]
 
 
 # Password validation
@@ -282,14 +288,13 @@ NEWS_IMAGE_MAX_SIZE_MB = 10
 NEWS_MAX_IMAGES_PER_ITEM = 10
 
 # CORS Configuration
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vue development server
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",  # Alternative frontend port
-    "http://127.0.0.1:3000",
-]
+# Read CORS settings from environment variables
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173').split(',')
 
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
+
+# Allow all origins setting from environment
+CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true'
 
 # Allow all origins in development (remove in production)
 if DEBUG:
@@ -307,6 +312,33 @@ CORS_ALLOW_HEADERS = [
     'x-csrftoken',
     'x-requested-with',
 ]
+
+# Security Settings for Production
+if not DEBUG:
+    # Cookie Security
+    SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'True').lower() == 'true'
+    CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'True').lower() == 'true'
+    
+    # HTTPS Security
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').lower() == 'true'
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'True').lower() == 'true'
+    SECURE_HSTS_PRELOAD = os.getenv('SECURE_HSTS_PRELOAD', 'True').lower() == 'true'
+    
+    # Content Security
+    SECURE_CONTENT_TYPE_NOSNIFF = os.getenv('SECURE_CONTENT_TYPE_NOSNIFF', 'True').lower() == 'true'
+    SECURE_BROWSER_XSS_FILTER = os.getenv('SECURE_BROWSER_XSS_FILTER', 'True').lower() == 'true'
+    SECURE_REFERRER_POLICY = os.getenv('SECURE_REFERRER_POLICY', 'strict-origin-when-cross-origin')
+    
+    # Additional cookie settings
+    SESSION_COOKIE_HTTPONLY = True
+    CSRF_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Strict'
+    CSRF_COOKIE_SAMESITE = 'Strict'
+else:
+    # Development settings - less restrictive
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
 # Logging Configuration
 LOGGING = {

@@ -1110,7 +1110,12 @@ class LoginView(APIView):
                     
                     # Update last login
                     user.last_login = timezone.now()
-                    user.save()
+                    try:
+                        user.save(update_fields=['last_login'])
+                    except Exception as save_error:
+                        logger.warning(f"Could not update last login: {save_error}")
+                        # Continue without saving last_login to avoid breaking login
+                        pass
                     
                     logger.info(f"User logged in: {user.email}")
                     
@@ -1137,6 +1142,9 @@ class LoginView(APIView):
                 
         except Exception as e:
             logger.error(f"Error during user login: {str(e)}")
+            return Response({
+                'detail': 'Login failed due to server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             return Response({
                 'detail': 'Login failed due to server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1244,7 +1252,7 @@ class AddUserView(APIView):
                 }, status=status.HTTP_403_FORBIDDEN)
             
             # Check if user already exists
-            if User.objects.filter(email=email).exists():
+            if User.objects.email_exists(email):
                 return Response({
                     'errors': {'email': ['A user with this email already exists.']}
                 }, status=status.HTTP_400_BAD_REQUEST)

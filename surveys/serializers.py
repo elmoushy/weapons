@@ -47,23 +47,55 @@ class QuestionSerializer(serializers.ModelSerializer):
         return data
     
     def validate_options(self, value):
-        """Validate options field for choice questions"""
+        """Basic validation for options field"""
         if not value:
             return value
         
-        question_type = self.initial_data.get('question_type')
-        if question_type in ['single_choice', 'multiple_choice']:
+        # Basic JSON validation
+        if isinstance(value, str):
             try:
-                options_list = json.loads(value) if isinstance(value, str) else value
+                options_list = json.loads(value)
+                if not isinstance(options_list, list):
+                    raise serializers.ValidationError("Options must be a valid JSON array")
+                return json.dumps(options_list)
+            except (json.JSONDecodeError, TypeError):
+                raise serializers.ValidationError("Options must be valid JSON array")
+        elif isinstance(value, list):
+            return json.dumps(value)
+        
+        return value
+    
+    def validate(self, data):
+        """Cross-field validation for questions"""
+        question_type = data.get('question_type')
+        options = data.get('options')
+        
+        # Validate options for choice questions
+        if question_type in ['single_choice', 'multiple_choice']:
+            if not options:
+                raise serializers.ValidationError(
+                    "Choice questions must have options"
+                )
+            
+            try:
+                # Parse options if it's a string
+                if isinstance(options, str):
+                    options_list = json.loads(options)
+                else:
+                    options_list = options
+                
                 if not isinstance(options_list, list) or len(options_list) < 2:
                     raise serializers.ValidationError(
                         "Choice questions must have at least 2 options"
                     )
-                return json.dumps(options_list)
+                    
+                # Store the properly formatted options back
+                data['options'] = json.dumps(options_list)
+                
             except (json.JSONDecodeError, TypeError):
                 raise serializers.ValidationError("Options must be valid JSON array")
         
-        return value
+        return data
 
 
 class AnswerSerializer(serializers.ModelSerializer):
@@ -105,7 +137,7 @@ class SurveySerializer(serializers.ModelSerializer):
     Follows the same patterns as news_service serializers.
     """
     
-    questions = QuestionSerializer(many=True, read_only=True)
+    questions = QuestionSerializer(many=True, required=False)
     creator_email = serializers.SerializerMethodField()
     response_count = serializers.SerializerMethodField()
     shared_with_emails = serializers.SerializerMethodField()
@@ -218,9 +250,12 @@ class SurveySerializer(serializers.ModelSerializer):
         return data
     
     def create(self, validated_data):
-        """Create survey with creator set to current user"""
+        """Create survey with creator set to current user and handle nested questions"""
         request = self.context.get('request')
         validated_data['creator'] = request.user
+        
+        # Extract questions data before creating survey
+        questions_data = validated_data.pop('questions', [])
         
         # Handle shared_with separately
         shared_with = validated_data.pop('shared_with', [])
@@ -229,8 +264,44 @@ class SurveySerializer(serializers.ModelSerializer):
         if validated_data.get('visibility') == 'PRIVATE':
             survey.shared_with.set(shared_with)
         
-        logger.info(f"Survey created: {survey.id} by {request.user.email}")
+        # Create questions if provided
+        for question_data in questions_data:
+            Question.objects.create(survey=survey, **question_data)
+        
+        logger.info(f"Survey created: {survey.id} with {len(questions_data)} questions by {request.user.email}")
         return survey
+    
+    def update(self, instance, validated_data):
+        """Update survey and handle nested questions"""
+        # Extract questions data before updating survey
+        questions_data = validated_data.pop('questions', None)
+        
+        # Handle shared_with separately
+        shared_with = validated_data.pop('shared_with', None)
+        
+        # Update survey fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Handle shared_with if provided
+        if shared_with is not None:
+            if instance.visibility == 'PRIVATE':
+                instance.shared_with.set(shared_with)
+            else:
+                instance.shared_with.clear()
+        
+        # Handle questions if provided
+        if questions_data is not None:
+            # Delete existing questions
+            instance.questions.all().delete()
+            
+            # Create new questions
+            for question_data in questions_data:
+                Question.objects.create(survey=instance, **question_data)
+        
+        logger.info(f"Survey updated: {instance.id} with {len(questions_data) if questions_data else 0} questions")
+        return instance
 
 
 class SurveySubmissionSerializer(serializers.Serializer):

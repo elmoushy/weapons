@@ -219,7 +219,7 @@ class CreateGroupSerializer(serializers.ModelSerializer):
         
         # Add admin users to the group
         for user_id in admin_user_ids:
-            user = User.objects.get(id=user_id)
+            user = User.objects.get(pk=user_id)
             UserGroup.objects.create(
                 user=user,
                 group=group,
@@ -240,7 +240,7 @@ class AddUserToGroupSerializer(serializers.Serializer):
     def validate_user_id(self, value):
         """Validate that the user exists."""
         try:
-            User.objects.get(id=value)
+            User.objects.get(pk=value)
         except User.DoesNotExist:
             raise serializers.ValidationError("User does not exist.")
         return value
@@ -293,7 +293,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     
     def validate_email(self, value):
         """Validate email is unique."""
-        if User.objects.filter(email=value).exists():
+        if User.objects.email_exists(value):
             raise serializers.ValidationError("A user with this email already exists.")
         return value
     
@@ -337,26 +337,40 @@ class UserLoginSerializer(serializers.Serializer):
     )
     
     def validate(self, data):
-        """Validate user credentials."""
+        """Validate user credentials using Oracle-compatible method."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         email = data.get('email')
         password = data.get('password')
         
         if email and password:
-            # Check if user exists and is a regular user
+            # Check if user exists using Oracle-compatible method
             try:
-                user = User.objects.get(email=email, auth_type='regular')
-            except User.DoesNotExist:
+                logger.info(f"Looking for user with email: {email}")
+                user = User.objects.get_by_email(email)
+                logger.info(f"User found: {user}")
+                if not user or user.auth_type != 'regular':
+                    logger.warning(f"Invalid user or auth_type for {email}")
+                    raise serializers.ValidationError("Invalid email or password.")
+            except Exception as e:
+                logger.error(f"Error in get_by_email for {email}: {e}")
                 raise serializers.ValidationError("Invalid email or password.")
             
-            # Authenticate user
+            # Authenticate user using username field
+            logger.info(f"Authenticating with username: {user.username}")
             user = authenticate(username=user.username, password=password)
+            logger.info(f"Authentication result: {user}")
             if not user:
+                logger.warning(f"Authentication failed for username: {user.username}")
                 raise serializers.ValidationError("Invalid email or password.")
             
             if not user.is_active:
+                logger.warning(f"User account is disabled: {user.username}")
                 raise serializers.ValidationError("User account is disabled.")
             
             data['user'] = user
+            logger.info("Validation successful")
         else:
             raise serializers.ValidationError("Email and password are required.")
         

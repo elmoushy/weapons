@@ -1,97 +1,27 @@
 """
-Custom User models for Azure AD authentication.
+Custom User models for Azure AD authentication with Oracle compatibility.
 
-This module defines a minimal User model that only includes the fields
-needed for Azure AD authentication, removing Django's default group
-and permission system.
+This module defines a User model that includes hash fields for Oracle
+database compatibility while maintaining encryption functionality.
 """
 
-from django.contrib.auth.models import AbstractBaseUser, BaseUserManager
+import hashlib
+from django.contrib.auth.models import AbstractBaseUser
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+from .managers import OracleCompatibleUserManager
 
 
-class CustomUserManager(BaseUserManager):
-    """
-    Custom manager for the User model.
-    
-    This manager handles user creation without relying on Django's
-    built-in group and permission system.
-    """
-    
-    def create_user(self, username, email=None, password=None, auth_type='regular', **extra_fields):
-        """
-        Create and return a regular user.
-        
-        Args:
-            username: The username (email for regular users, Azure AD Object ID for Azure users)
-            email: User's email address
-            password: User's password (only for regular users)
-            auth_type: 'regular' for email/password, 'azure' for Azure AD
-            **extra_fields: Additional fields
-            
-        Returns:
-            User instance
-        """
-        if not username:
-            raise ValueError('The Username field must be set')
-        
-        email = self.normalize_email(email) if email else ''
-        
-        # For regular users, username should be the email
-        if auth_type == 'regular' and not email:
-            if '@' in username:
-                email = username
-            else:
-                raise ValueError('Email must be provided for regular users')
-        
-        user = self.model(
-            username=username,
-            email=email,
-            auth_type=auth_type,
-            **extra_fields
-        )
-        
-        if auth_type == 'regular' and password:
-            user.set_password(password)
-        else:
-            user.set_unusable_password()  # For Azure AD users
-            
-        user.save(using=self._db)
-        return user
-    
-    def create_superuser(self, username, email=None, password=None, **extra_fields):
-        """
-        Create and return a superuser.
-        
-        Args:
-            username: The username (typically Azure AD Object ID for Azure users)
-            email: User's email address
-            password: User's password (only for regular users)
-            **extra_fields: Additional fields
-            
-        Returns:
-            User instance with admin privileges
-        """
-        extra_fields.setdefault('is_active', True)
-        extra_fields.setdefault('role', 'super_admin')
-        extra_fields.setdefault('auth_type', 'regular')  # Default to regular for superuser creation
-        
-        return self.create_user(username, email, password, **extra_fields)
 
 
 class User(AbstractBaseUser):
     """
-    Custom User model for Azure AD authentication.
+    Custom User model for Azure AD authentication with Oracle compatibility.
     
-    This model includes only the essential fields needed for the application:
-    - id: Primary key
-    - password: Set as unusable for Azure AD users
-    - role: User role (default: 'employee')
-    - username: Azure AD Object ID or username claim
-    - email: User's email address
-    - is_active: Whether the user account is active
-    - date_joined: When the user was first created
+    This model includes hash fields for Oracle database compatibility:
+    - email_hash: SHA256 hash of email for filtering
+    - username_hash: SHA256 hash of username for filtering
     """
     
     ROLE_CHOICES = [
@@ -108,13 +38,27 @@ class User(AbstractBaseUser):
     # Core required fields
     username = models.CharField(
         max_length=255,
-        unique=True,
+        unique=True,  # Keep unique for Django compatibility, but we'll handle Oracle separately
         help_text='Azure AD Object ID for Azure users, email for regular users'
     )
     email = models.EmailField(
         max_length=254,
-        unique=True,
+        unique=True,  # Keep unique for Django compatibility, but we'll handle Oracle separately
         help_text='User email address'
+    )
+    
+    # Hash fields for Oracle compatibility and filtering
+    email_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='SHA256 hash of email for Oracle filtering',
+        db_index=True
+    )
+    username_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='SHA256 hash of username for Oracle filtering',
+        db_index=True
     )
     auth_type = models.CharField(
         max_length=20,
@@ -154,7 +98,7 @@ class User(AbstractBaseUser):
         help_text='Last time user logged in'
     )
     
-    objects = CustomUserManager()
+    objects = OracleCompatibleUserManager()
     
     USERNAME_FIELD = 'username'
     REQUIRED_FIELDS = ['email']
@@ -163,6 +107,41 @@ class User(AbstractBaseUser):
         db_table = 'auth_user'  # Use Django's default table name
         verbose_name = 'User'
         verbose_name_plural = 'Users'
+        # Keep these constraints for Django compatibility
+        # Oracle-specific constraints are handled in migrations
+    
+    def clean(self):
+        """Custom validation for Oracle compatibility using hash fields."""
+        from .oracle_utils import is_oracle_db
+        super().clean()
+        
+        # For Oracle, use hash-based uniqueness validation
+        if is_oracle_db():
+            if self.email:
+                email_hash = hashlib.sha256(self.email.encode('utf-8')).hexdigest()
+                existing_user = User.objects.filter(email_hash=email_hash).exclude(pk=self.pk).first()
+                if existing_user:
+                    from django.core.exceptions import ValidationError
+                    raise ValidationError({'email': 'A user with this email already exists.'})
+            
+            if self.username:
+                username_hash = hashlib.sha256(self.username.encode('utf-8')).hexdigest()
+                existing_user = User.objects.filter(username_hash=username_hash).exclude(pk=self.pk).first()
+                if existing_user:
+                    from django.core.exceptions import ValidationError
+                    raise ValidationError({'username': 'A user with this username already exists.'})
+    
+    def save(self, *args, **kwargs):
+        """Override save to generate hash fields and validate uniqueness."""
+        # Generate hashes before saving
+        if self.email:
+            self.email_hash = hashlib.sha256(self.email.encode('utf-8')).hexdigest()
+        if self.username:
+            self.username_hash = hashlib.sha256(self.username.encode('utf-8')).hexdigest()
+        
+        # Call clean to validate (including Oracle-specific validation)
+        self.full_clean()
+        super().save(*args, **kwargs)
     
     def __str__(self):
         return f"{self.email or self.username} ({self.role})"
