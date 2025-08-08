@@ -29,9 +29,9 @@ def create_super_admin():
     Create a super admin user with the specified credentials.
     """
     # User details
-    email = "seif778811@gmail.com"
+    email = "admintest@gmail.com"
     auth_type = "regular"
-    password = "Password778811"
+    password = "Password781#"
     first_name = "Seif"
     last_name = "Eldein"
     role = "super_admin"
