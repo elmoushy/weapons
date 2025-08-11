@@ -150,8 +150,8 @@ class SurveySerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'visibility', 'shared_with',
             'creator', 'creator_email', 'is_locked', 'is_active',
             'start_date', 'end_date', 'status', 'is_currently_active',
-            'questions', 'response_count', 'shared_with_emails',
-            'created_at', 'updated_at'
+            'public_contact_method', 'questions', 'response_count', 
+            'shared_with_emails', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'updated_at', 'status', 'is_currently_active']
     
@@ -344,7 +344,9 @@ class ResponseSubmissionSerializer(serializers.Serializer):
     
     survey_id = serializers.UUIDField(required=True)
     token = serializers.CharField(required=False, allow_blank=True)
+    password = serializers.CharField(required=False, allow_blank=True)
     email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     answers = serializers.ListField(
         child=serializers.DictField(),
         allow_empty=False
@@ -376,11 +378,16 @@ class ResponseSubmissionSerializer(serializers.Serializer):
         survey_id = data.get('survey_id')
         token = data.get('token')
         email = data.get('email')
+        phone = data.get('phone')
         
         if not survey_id:
             raise serializers.ValidationError("Survey ID is required")
         
-        # We'll validate survey access in the view since we need database access
-        # This is just basic structure validation
+        # Basic validation to ensure email and phone are not both provided
+        if email and phone:
+            raise serializers.ValidationError("Please provide either email or phone, not both")
+        
+        # We'll validate survey access and required contact method in the view 
+        # since we need database access to check survey settings
         
         return data

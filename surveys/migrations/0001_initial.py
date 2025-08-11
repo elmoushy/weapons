@@ -8,12 +8,47 @@ from django.conf import settings
 from django.db import migrations, models, connection
 
 
+def _oracle_type_for(cursor, table_name, column_name):
+    """
+    Return an Oracle column type string exactly matching an existing column,
+    e.g. NUMBER(19), CHAR(32), VARCHAR2(150), RAW(16), NUMBER, NUMBER(10,2)
+    """
+    cursor.execute(
+        """
+        SELECT data_type, data_length, data_precision, data_scale
+        FROM user_tab_columns
+        WHERE table_name = :t AND column_name = :c
+        """,
+        {"t": table_name.upper(), "c": column_name.upper()},
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise RuntimeError(f"Column {table_name}.{column_name} not found in Oracle metadata")
+
+    data_type, data_length, data_precision, data_scale = row
+    data_type = data_type.upper()
+
+    if data_type in ("CHAR", "NCHAR", "VARCHAR2", "NVARCHAR2", "RAW"):
+        return f"{data_type}({int(data_length)})"
+
+    if data_type == "NUMBER":
+        if data_precision is None:
+            return "NUMBER"
+        if data_scale is None or int(data_scale) == 0:
+            return f"NUMBER({int(data_precision)})"
+        return f"NUMBER({int(data_precision)},{int(data_scale)})"
+
+    # Fallback
+    if data_length:
+        return f"{data_type}({int(data_length)})"
+    return data_type
+
+
 def create_surveys_tables(apps, schema_editor):
     """Create surveys tables with Oracle-compatible SQL"""
     
-    # Check if we're using Oracle
-    if not connection.vendor == 'oracle':
-        # Let Django handle non-Oracle databases
+    # Skip table creation on Oracle - let Django's CreateModel handle it
+    if connection.vendor == 'oracle':
         return
     
     with connection.cursor() as cursor:
@@ -163,39 +198,75 @@ def create_surveys_tables(apps, schema_editor):
         """)
         
         # Create SURVEYS_SURVEY_SHARED_WITH_GROUPS table (many-to-many)
-        cursor.execute("""
+        print("🔧 Creating SURVEYS_SURVEY_SHARED_WITH_GROUPS table...")
+        
+        # Get exact column types from existing tables
+        try:
+            survey_id_type = _oracle_type_for(cursor, "SURVEYS_SURVEY", "ID")
+            group_id_type = _oracle_type_for(cursor, "AUTHENTICATION_GROUP", "ID")
+        except RuntimeError as e:
+            print(f"❌ Error getting column types: {e}")
+            # Fallback to hardcoded types if tables don't exist yet
+            survey_id_type = "RAW(16)"
+            group_id_type = "NUMBER(38)"
+        
+        # Use numeric type for the primary key
+        id_type = group_id_type if group_id_type.startswith("NUMBER") else "NUMBER(19)"
+        
+        print(f"   Survey ID type: {survey_id_type}")
+        print(f"   Group ID type: {group_id_type}")
+        print(f"   Table ID type: {id_type}")
+        
+        # Clean up if partially exists
+        cleanup_statements = [
+            "DROP TRIGGER SURVEYS_SURVEY_SHARED_GRP_TRG",
+            "DROP TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS CASCADE CONSTRAINTS",
+            "DROP SEQUENCE SURVEYS_SURVEY_SHARED_GRP_ID_SEQ",
+        ]
+        
+        for sql in cleanup_statements:
+            try:
+                cursor.execute(sql)
+                print(f"   Cleaned up: {sql}")
+            except Exception:
+                pass  # ignore if it doesn't exist
+        
+        cursor.execute(f"""
             CREATE TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS (
-                ID NUMBER(38) PRIMARY KEY,
-                SURVEY_ID RAW(16) NOT NULL,
-                GROUP_ID NUMBER(38) NOT NULL,
-                CONSTRAINT FK_SURVEYS_SHARED_GROUPS_SURVEY 
+                ID {id_type} PRIMARY KEY,
+                SURVEY_ID {survey_id_type} NOT NULL,
+                GROUP_ID {group_id_type} NOT NULL,
+                CONSTRAINT FK_SURVEYS_SSG_SURVEY 
                     FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE,
-                CONSTRAINT FK_SURVEYS_SHARED_GROUPS_GROUP 
+                CONSTRAINT FK_SURVEYS_SSG_GROUP 
                     FOREIGN KEY (GROUP_ID) REFERENCES AUTHENTICATION_GROUP(ID) ON DELETE CASCADE,
-                CONSTRAINT UK_SURVEYS_SHARED_GROUPS 
+                CONSTRAINT UK_SURVEYS_SSG 
                     UNIQUE (SURVEY_ID, GROUP_ID)
             )
         """)
+        print("   ✅ Table created")
         
         # Create sequence for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
         cursor.execute("""
-            CREATE SEQUENCE SURVEYS_SURVEY_SHARED_GRP_ID_SEQ
+            CREATE SEQUENCE SURVEYS_SSG_ID_SEQ
             START WITH 1
             INCREMENT BY 1
             NOCACHE
         """)
+        print("   ✅ Sequence created")
         
         # Create trigger for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
         cursor.execute("""
-            CREATE OR REPLACE TRIGGER SURVEYS_SURVEY_SHARED_GRP_TRG
+            CREATE OR REPLACE TRIGGER SURVEYS_SSG_ID_TRG
             BEFORE INSERT ON SURVEYS_SURVEY_SHARED_WITH_GROUPS
             FOR EACH ROW
             BEGIN
                 IF :NEW.ID IS NULL THEN
-                    SELECT SURVEYS_SURVEY_SHARED_GRP_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
+                    SELECT SURVEYS_SSG_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
                 END IF;
             END;
         """)
+        print("   ✅ Trigger created")
         
         # Create indexes for performance
         indexes = [
@@ -222,8 +293,8 @@ def create_surveys_tables(apps, schema_editor):
             "CREATE INDEX IDX_SURVEYS_SHARED_SURVEY ON SURVEYS_SURVEY_SHARED_WITH(SURVEY_ID)",
             "CREATE INDEX IDX_SURVEYS_SHARED_USER ON SURVEYS_SURVEY_SHARED_WITH(USER_ID)",
             
-            "CREATE INDEX IDX_SURVEYS_SHARED_GRP_SURVEY ON SURVEYS_SURVEY_SHARED_WITH_GROUPS(SURVEY_ID)",
-            "CREATE INDEX IDX_SURVEYS_SHARED_GRP_GROUP ON SURVEYS_SURVEY_SHARED_WITH_GROUPS(GROUP_ID)",
+            "CREATE INDEX IDX_SURVEYS_SSG_SURVEY ON SURVEYS_SURVEY_SHARED_WITH_GROUPS(SURVEY_ID)",
+            "CREATE INDEX IDX_SURVEYS_SSG_GROUP ON SURVEYS_SURVEY_SHARED_WITH_GROUPS(GROUP_ID)",
             
             "CREATE INDEX IDX_SURVEYS_TOKEN_TOKEN ON SURVEYS_PUBLIC_ACCESS_TOKEN(TOKEN)",
             "CREATE INDEX IDX_SURVEYS_TOKEN_SURVEY ON SURVEYS_PUBLIC_ACCESS_TOKEN(SURVEY_ID)",
@@ -237,14 +308,16 @@ def create_surveys_tables(apps, schema_editor):
             except Exception as e:
                 # Index might already exist, continue
                 pass
+        
+        print("   ✅ Indexes created")
+        print("✅ SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation complete!")
 
 
 def drop_surveys_tables(apps, schema_editor):
     """Drop surveys tables"""
     
-    # Check if we're using Oracle
-    if not connection.vendor == 'oracle':
-        # Let Django handle non-Oracle databases
+    # Skip table dropping on Oracle - let Django handle it
+    if connection.vendor == 'oracle':
         return
         
     with connection.cursor() as cursor:
@@ -259,7 +332,7 @@ def drop_surveys_tables(apps, schema_editor):
         ]
         
         sequences_to_drop = [
-            "SURVEYS_SURVEY_SHARED_GRP_ID_SEQ",
+            "SURVEYS_SSG_ID_SEQ",
             "SURVEYS_SURVEY_SHARED_WITH_ID_SEQ",
             "SURVEYS_ANSWER_ID_SEQ"
         ]
@@ -273,6 +346,19 @@ def drop_surveys_tables(apps, schema_editor):
         for seq in sequences_to_drop:
             try:
                 cursor.execute(f"DROP SEQUENCE {seq}")
+            except Exception:
+                pass
+        
+        # Drop triggers
+        triggers_to_drop = [
+            "SURVEYS_SSG_ID_TRG",
+            "SURVEYS_SURVEY_SHARED_WITH_TRG",
+            "SURVEYS_ANSWER_ID_TRG"
+        ]
+        
+        for trigger in triggers_to_drop:
+            try:
+                cursor.execute(f"DROP TRIGGER {trigger}")
             except Exception:
                 pass
 
@@ -395,6 +481,9 @@ class Migration(migrations.Migration):
             model_name='question',
             index=models.Index(fields=['text_hash'], name='questions_text_hash_idx'),
         ),
-        # For Oracle databases, create the Oracle-specific tables
-        migrations.RunPython(create_surveys_tables, reverse_code=drop_surveys_tables),
+        # Run custom SQL for Oracle table creation
+        migrations.RunPython(
+            create_surveys_tables,
+            reverse_code=drop_surveys_tables
+        ),
     ]

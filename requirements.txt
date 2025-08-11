@@ -24,9 +24,6 @@ Pillow>=10.0.0
 
 # Additional useful packages
 pytz==2025.2  # For timezone handling
-pyOpenSSL>=24.0.0  # SSL/TLS support
-Werkzeug>=3.0.0  # WSGI utility library
-django-extensions>=3.2.0  # Django extensions
 
 # Database drivers
 oracledb==3.3.0  # Oracle database driver

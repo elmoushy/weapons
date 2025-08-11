@@ -119,11 +119,11 @@ WSGI_APPLICATION = 'weaponpowercloud_backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.oracle',
-        'NAME': os.getenv('ORACLE_SERVICE', 'PROD'),
-        'USER': os.getenv('ORACLE_USERNAME', 'APEX_PUBLIC_USER'),
-        'PASSWORD': os.getenv('ORACLE_PASSWORD', 'KgJyrx3$1'),
-        'HOST': os.getenv('ORACLE_HOST', '185.197.251.203'),
-        'PORT': os.getenv('ORACLE_PORT', '1521'),
+        'NAME': os.getenv('ORACLE_SERVICE'),
+        'USER': os.getenv('ORACLE_USERNAME'),
+        'PASSWORD': os.getenv('ORACLE_PASSWORD'),
+        'HOST': os.getenv('ORACLE_HOST'),
+        'PORT': os.getenv('ORACLE_PORT'),
         'OPTIONS': {
             # Oracle-specific connection options
         },

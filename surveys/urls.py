@@ -62,6 +62,19 @@ urlpatterns = [
          views.TokenSurveyDetailView.as_view(), 
          name='token-survey-detail'),
     
+    # Password-Protected Survey Access APIs
+    path('password-access/<str:token>/', 
+         views.PasswordAccessValidationView.as_view(), 
+         name='password-access-validation'),
+    
+    path('password-surveys/<uuid:survey_id>/', 
+         views.PasswordProtectedSurveyView.as_view(), 
+         name='password-survey-detail'),
+    
+    path('password-responses/', 
+         views.PasswordProtectedSurveyResponseView.as_view(), 
+         name='password-survey-response'),
+    
     # Bulk operations
     path('bulk-operations/', views.bulk_operations, name='bulk-operations'),
     

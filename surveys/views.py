@@ -199,7 +199,7 @@ class SurveyViewSet(ModelViewSet):
             )
     
     def update(self, request, *args, **kwargs):
-        """Update survey with support for access_level changes and public token invalidation"""
+        """Update survey with comprehensive access token management on visibility changes"""
         try:
             survey = self.get_object()
             old_visibility = survey.visibility
@@ -227,25 +227,55 @@ class SurveyViewSet(ModelViewSet):
             serializer.is_valid(raise_exception=True)
             serializer.save()
             
-            # Check if visibility changed from PUBLIC to AUTH or PRIVATE
+            # Handle public access token management based on visibility changes
             new_visibility = serializer.instance.visibility
-            if (old_visibility == 'PUBLIC' and 
-                new_visibility in ['AUTH', 'PRIVATE']):
+            tokens_message = ""
+            
+            if old_visibility != new_visibility:
+                if old_visibility == 'PUBLIC':
+                    # When changing FROM PUBLIC to any other visibility:
+                    # Invalidate ALL public access tokens (including password-protected ones)
+                    if new_visibility in ['AUTH', 'PRIVATE', 'GROUPS']:
+                        invalidated_count = PublicAccessToken.objects.filter(
+                            survey=survey,
+                            is_active=True
+                        ).update(is_active=False)
+                        
+                        tokens_message = f" Invalidated {invalidated_count} public access tokens."
+                        logger.info(f"Survey {survey.id} visibility changed from PUBLIC to {new_visibility}. "
+                                   f"Invalidated {invalidated_count} public tokens.")
                 
-                # Invalidate all public access tokens for this survey
-                invalidated_count = PublicAccessToken.objects.filter(
-                    survey=survey,
-                    is_active=True
-                ).update(is_active=False)
+                elif new_visibility != 'PUBLIC' and old_visibility in ['AUTH', 'PRIVATE', 'GROUPS']:
+                    # When changing between non-PUBLIC visibilities:
+                    # Invalidate public access tokens but keep password-protected ones if they exist
+                    invalidated_count = PublicAccessToken.objects.filter(
+                        survey=survey,
+                        is_active=True,
+                        password__isnull=True  # Only invalidate non-password-protected tokens
+                    ).update(is_active=False)
+                    
+                    if invalidated_count > 0:
+                        tokens_message = f" Invalidated {invalidated_count} non-password-protected tokens."
+                        logger.info(f"Survey {survey.id} visibility changed from {old_visibility} to {new_visibility}. "
+                                   f"Invalidated {invalidated_count} non-password-protected tokens.")
                 
-                logger.info(f"Survey {survey.id} visibility changed from PUBLIC to {new_visibility}. "
-                           f"Invalidated {invalidated_count} public tokens.")
+                # Special handling when changing TO PUBLIC
+                elif new_visibility == 'PUBLIC':
+                    # When changing TO PUBLIC, we might want to keep existing tokens active
+                    # or create new ones - this depends on business logic
+                    logger.info(f"Survey {survey.id} visibility changed to PUBLIC from {old_visibility}. "
+                               f"Existing tokens remain active.")
+                    tokens_message = " Survey is now publicly accessible."
+            
+            success_message = "Survey updated successfully"
+            if tokens_message:
+                success_message += tokens_message
             
             logger.info(f"Survey {survey.id} updated by {request.user.email}")
             
             return uniform_response(
                 success=True,
-                message="Survey updated successfully",
+                message=success_message,
                 data=serializer.data
             )
             
@@ -287,7 +317,7 @@ class SurveyViewSet(ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsCreatorOrReadOnly])
     def audience(self, request, pk=None):
         """
-        Set survey audience and sharing settings.
+        Set survey audience and sharing settings with comprehensive token management.
         
         Body examples:
         {"visibility": "AUTH"}                        # everyone with token
@@ -297,6 +327,7 @@ class SurveyViewSet(ModelViewSet):
         """
         try:
             survey = self.get_object()
+            old_visibility = survey.visibility
             
             if survey.is_locked:
                 return uniform_response(
@@ -316,6 +347,42 @@ class SurveyViewSet(ModelViewSet):
                     message="Invalid visibility value",
                     status_code=status.HTTP_400_BAD_REQUEST
                 )
+            
+            # Handle public access token management based on visibility changes
+            tokens_message = ""
+            if old_visibility != visibility:
+                if old_visibility == 'PUBLIC':
+                    # When changing FROM PUBLIC to any other visibility:
+                    # Invalidate ALL public access tokens
+                    if visibility in ['AUTH', 'PRIVATE', 'GROUPS']:
+                        invalidated_count = PublicAccessToken.objects.filter(
+                            survey=survey,
+                            is_active=True
+                        ).update(is_active=False)
+                        
+                        tokens_message = f" Invalidated {invalidated_count} public access tokens."
+                        logger.info(f"Survey {survey.id} visibility changed from PUBLIC to {visibility}. "
+                                   f"Invalidated {invalidated_count} public tokens.")
+                
+                elif visibility != 'PUBLIC' and old_visibility in ['AUTH', 'PRIVATE', 'GROUPS']:
+                    # When changing between non-PUBLIC visibilities:
+                    # Invalidate non-password-protected public access tokens
+                    invalidated_count = PublicAccessToken.objects.filter(
+                        survey=survey,
+                        is_active=True,
+                        password__isnull=True  # Only invalidate non-password-protected tokens
+                    ).update(is_active=False)
+                    
+                    if invalidated_count > 0:
+                        tokens_message = f" Invalidated {invalidated_count} non-password-protected tokens."
+                        logger.info(f"Survey {survey.id} visibility changed from {old_visibility} to {visibility}. "
+                                   f"Invalidated {invalidated_count} non-password-protected tokens.")
+                
+                # Special handling when changing TO PUBLIC
+                elif visibility == 'PUBLIC':
+                    logger.info(f"Survey {survey.id} visibility changed to PUBLIC from {old_visibility}. "
+                               f"Existing tokens remain active.")
+                    tokens_message = " Survey is now publicly accessible."
             
             survey.visibility = visibility
             survey.save(update_fields=['visibility', 'updated_at'])
@@ -346,6 +413,10 @@ class SurveyViewSet(ModelViewSet):
                 survey.shared_with.clear()
                 survey.shared_with_groups.clear()
             
+            success_message = "Survey audience updated successfully"
+            if tokens_message:
+                success_message += tokens_message
+            
             logger.info(f"Survey {survey.id} audience updated by {request.user.email}")
             
             response_data = {'visibility': visibility}
@@ -356,7 +427,7 @@ class SurveyViewSet(ModelViewSet):
             
             return uniform_response(
                 success=True,
-                message="Survey audience updated successfully",
+                message=success_message,
                 data=response_data
             )
             
@@ -691,11 +762,29 @@ class SurveyViewSet(ModelViewSet):
     def generate_link(self, request, pk=None):
         """
         Generate a public access link for the survey.
+        Only works for surveys with PUBLIC or AUTH visibility.
         
         POST /api/surveys/surveys/{survey_id}/generate-link/
         """
         try:
             survey = self.get_object()
+            
+            # Check if survey visibility allows public access
+            if survey.visibility not in ['PUBLIC', 'AUTH']:
+                return uniform_response(
+                    success=False,
+                    message=f"Cannot generate public link for {survey.visibility} survey. "
+                           f"Change visibility to PUBLIC or AUTH first.",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if survey is active
+            if not survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Cannot generate public link for inactive survey.",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
             
             # Generate unique token
             token = PublicAccessToken.generate_token()
@@ -704,10 +793,11 @@ class SurveyViewSet(ModelViewSet):
             days_to_expire = request.data.get('days_to_expire', 30)
             expires_at = timezone.now() + timedelta(days=days_to_expire)
             
-            # Deactivate any existing tokens for this survey
+            # Deactivate any existing non-password-protected tokens for this survey
             PublicAccessToken.objects.filter(
                 survey=survey,
-                is_active=True
+                is_active=True,
+                password__isnull=True  # Only deactivate non-password-protected tokens
             ).update(is_active=False)
             
             # Create the new token record
@@ -725,7 +815,9 @@ class SurveyViewSet(ModelViewSet):
                 message="Public link generated successfully",
                 data={
                     'token': token,
-                    'expires_at': expires_at.isoformat()
+                    'expires_at': expires_at.isoformat(),
+                    'survey_visibility': survey.visibility,
+                    'note': 'This link will become invalid if survey visibility changes from PUBLIC/AUTH'
                 },
                 status_code=status.HTTP_201_CREATED
             )
@@ -735,6 +827,116 @@ class SurveyViewSet(ModelViewSet):
             return uniform_response(
                 success=False,
                 message="Failed to generate public link",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsCreatorOrReadOnly], url_path='generate-password-link')
+    def generate_password_link(self, request, pk=None):
+        """
+        Generate a password-protected public access link for the survey.
+        Works for any survey visibility - password protection allows access control.
+        
+        POST /api/surveys/surveys/{survey_id}/generate-password-link/
+        Body:
+        {
+            "days_to_expire": 30,  // optional, default 30
+            "restricted_email": ["user1@example.com", "user2@example.com"],  // optional, restrict to these emails
+            "restricted_phone": ["+1234567890", "+0987654321"]  // optional, restrict to these phones
+        }
+        """
+        try:
+            survey = self.get_object()
+            
+            # Check if survey is active
+            if not survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Cannot generate password-protected link for inactive survey.",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Validate input
+            restricted_email = request.data.get('restricted_email', [])
+            restricted_phone = request.data.get('restricted_phone', [])
+            
+            # Ensure they are lists
+            if not isinstance(restricted_email, list):
+                restricted_email = [restricted_email] if restricted_email else []
+            if not isinstance(restricted_phone, list):
+                restricted_phone = [restricted_phone] if restricted_phone else []
+            
+            # Validate email formats
+            if restricted_email:
+                from django.core.validators import validate_email
+                from django.core.exceptions import ValidationError
+                for email in restricted_email:
+                    try:
+                        validate_email(email)
+                    except ValidationError:
+                        return uniform_response(
+                            success=False,
+                            message=f"Invalid email format: {email}",
+                            status_code=status.HTTP_400_BAD_REQUEST
+                        )
+            
+            # Generate unique token and password
+            token = PublicAccessToken.generate_token()
+            password = PublicAccessToken.generate_password()
+            
+            # Set expiration (default 30 days from now)
+            days_to_expire = request.data.get('days_to_expire', 30)
+            expires_at = timezone.now() + timedelta(days=days_to_expire)
+            
+            # Deactivate any existing password-protected tokens for this survey
+            PublicAccessToken.objects.filter(
+                survey=survey,
+                is_active=True,
+                password__isnull=False
+            ).update(is_active=False)
+            
+            # Create the new password-protected token record
+            public_token = PublicAccessToken.objects.create(
+                survey=survey,
+                token=token,
+                password=password,
+                expires_at=expires_at,
+                created_by=request.user
+            )
+            
+            # Set the restricted contacts using helper methods
+            public_token.set_restricted_emails(restricted_email)
+            public_token.set_restricted_phones(restricted_phone)
+            public_token.save()
+            
+            logger.info(f"Password-protected link generated for survey {survey.id} by {request.user.email}")
+            
+            response_data = {
+                'token': token,
+                'password': password,
+                'expires_at': expires_at.isoformat(),
+                'is_password_protected': True,
+                'is_contact_restricted': bool(restricted_email or restricted_phone),
+                'survey_visibility': survey.visibility,
+                'note': 'Password-protected links work regardless of survey visibility changes'
+            }
+            
+            if restricted_email:
+                response_data['restricted_email'] = restricted_email
+            if restricted_phone:
+                response_data['restricted_phone'] = restricted_phone
+            
+            return uniform_response(
+                success=True,
+                message="Password-protected link generated successfully",
+                data=response_data,
+                status_code=status.HTTP_201_CREATED
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating password-protected link for survey {pk}: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to generate password-protected link",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -755,10 +957,10 @@ class SurveyViewSet(ModelViewSet):
                     survey=survey,
                     is_active=True
                 ).order_by('-created_at')
-                
+
                 links_data = []
                 base_url = request.build_absolute_uri('/').rstrip('/')
-                
+
                 for token_obj in active_tokens:
                     if token_obj.is_valid():
                         links_data.append({
@@ -770,15 +972,63 @@ class SurveyViewSet(ModelViewSet):
                             'is_expired': token_obj.is_expired(),
                             'created_by': token_obj.created_by.email if token_obj.created_by else None
                         })
-                
+
                 if not links_data:
-                    return uniform_response(
-                        success=False,
-                        message="No public link found for this survey",
-                        data=None,
-                        status_code=status.HTTP_404_NOT_FOUND
-                    )
-                
+                    # Check if we can auto-generate a public link
+                    if survey.visibility not in ['PUBLIC', 'AUTH']:
+                        return uniform_response(
+                            success=False,
+                            message=f"No public links found. Cannot auto-generate for {survey.visibility} survey. "
+                                   f"Change visibility to PUBLIC or AUTH first, or use password-protected links.",
+                            status_code=status.HTTP_404_NOT_FOUND
+                        )
+                    
+                    if not survey.is_active:
+                        return uniform_response(
+                            success=False,
+                            message="No public links found for inactive survey.",
+                            status_code=status.HTTP_404_NOT_FOUND
+                        )
+                    
+                    # Auto-generate a public link if none exists (for user convenience)
+                    try:
+                        # Generate unique token
+                        token = PublicAccessToken.generate_token()
+                        
+                        # Set expiration (default 30 days from now)
+                        expires_at = timezone.now() + timedelta(days=30)
+                        
+                        # Create the new token record
+                        public_token = PublicAccessToken.objects.create(
+                            survey=survey,
+                            token=token,
+                            expires_at=expires_at,
+                            created_by=request.user
+                        )
+                        
+                        logger.info(f"Auto-generated public link for survey {survey.id} by {request.user.email}")
+                        
+                        return uniform_response(
+                            success=True,
+                            message="Public link auto-generated successfully",
+                            data={
+                                'token': token,
+                                'expires_at': expires_at.isoformat(),
+                                'auto_generated': True,
+                                'survey_visibility': survey.visibility,
+                                'note': 'This link will become invalid if survey visibility changes from PUBLIC/AUTH'
+                            }
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Error auto-generating public link for survey {pk}: {e}")
+                        return uniform_response(
+                            success=False,
+                            message="No public link found for this survey",
+                            data=None,
+                            status_code=status.HTTP_404_NOT_FOUND
+                        )
+
                 # Return single token for API compatibility
                 latest_token = links_data[0]
                 return uniform_response(
@@ -886,6 +1136,7 @@ class SurveyViewSet(ModelViewSet):
                     'title': survey.title,
                     'description': survey.description,
                     'visibility': survey.visibility,
+                    'public_contact_method': survey.public_contact_method,
                     'status': survey.get_status(),
                     'is_currently_active': survey.is_currently_active(),
                     'start_date': survey.start_date.isoformat() if survey.start_date else None,
@@ -975,6 +1226,7 @@ class SurveyViewSet(ModelViewSet):
                     'id': str(survey.id),
                     'title': survey.title,
                     'description': survey.description,
+                    'public_contact_method': survey.public_contact_method,
                     'estimated_time': max(survey.questions.count() * 1, 5),  # 1 min per question, min 5 min
                     'questions_count': survey.questions.count(),
                     'questions': question_serializer.data
@@ -1632,10 +1884,10 @@ class SurveyResponseSubmissionView(APIView):
     
     permission_classes = [AllowAny]  # Handle permissions manually
     
-    def _validate_survey_access(self, request, survey, token=None, email=None):
+    def _validate_survey_access(self, request, survey, token=None, password=None, email=None, phone=None):
         """
         Validate access to survey based on visibility and provided credentials
-        Returns tuple: (has_access, user_or_email, error_message)
+        Returns tuple: (has_access, user_or_email_or_phone, error_message)
         """
         # Check if survey is currently active based on dates
         if not survey.is_currently_active():
@@ -1651,25 +1903,70 @@ class SurveyResponseSubmissionView(APIView):
                     is_active=True
                 )
                 if access_token.is_valid():
+                    # Check if token is password-protected
+                    if access_token.is_password_protected():
+                        # Password is required for password-protected tokens
+                        if not password:
+                            return False, None, "Password is required for this token"
+                        if not access_token.validate_password(password):
+                            return False, None, "Invalid password"
+                        
+                        # Validate contact restrictions if any
+                        if not access_token.validate_contact(email, phone):
+                            restricted_emails = access_token.get_restricted_emails()
+                            restricted_phones = access_token.get_restricted_phones()
+                            if restricted_emails:
+                                return False, None, f"This token is restricted to emails: {', '.join(restricted_emails)}"
+                            elif restricted_phones:
+                                return False, None, f"This token is restricted to phones: {', '.join(restricted_phones)}"
+                    
                     # Token is valid, determine user
                     if request.user.is_authenticated:
                         return True, request.user, None
-                    elif email:
-                        return True, email, None
                     else:
-                        return False, None, "Email is required for anonymous access with token"
+                        # For anonymous users, check if token has contact restrictions first
+                        restricted_emails = access_token.get_restricted_emails()
+                        restricted_phones = access_token.get_restricted_phones()
+                        if restricted_emails:
+                            if email and email.lower() in [e.lower() for e in restricted_emails]:
+                                return True, email, None
+                            else:
+                                return False, None, f"This token requires one of these emails: {', '.join(restricted_emails)}"
+                        elif restricted_phones:
+                            if phone and phone in restricted_phones:
+                                return True, phone, None
+                            else:
+                                return False, None, f"This token requires one of these phones: {', '.join(restricted_phones)}"
+                        else:
+                            # No contact restrictions, use survey's default requirement
+                            required_method = getattr(survey, 'public_contact_method', 'email')
+                            if required_method == 'email' and email:
+                                return True, email, None
+                            elif required_method == 'phone' and phone:
+                                return True, phone, None
+                            elif email:
+                                return True, email, None
+                            elif phone:
+                                return True, phone, None
+                            else:
+                                return False, None, "Email or phone is required for anonymous access"
             except PublicAccessToken.DoesNotExist:
                 return False, None, "Invalid or expired token"
         
         # Handle different visibility levels
         if survey.visibility == "PUBLIC":
-            # Public surveys require email for anonymous users
+            # Public surveys require email or phone for anonymous users based on survey settings
             if request.user.is_authenticated:
                 return True, request.user, None
-            elif email:
-                return True, email, None
             else:
-                return False, None, "Email is required for public survey responses"
+                required_method = survey.public_contact_method
+                if required_method == 'email' and email:
+                    return True, email, None
+                elif required_method == 'phone' and phone:
+                    return True, phone, None
+                else:
+                    contact_type = "Email" if required_method == 'email' else "Phone"
+                    return False, None, f"{contact_type} is required for public survey responses"
         
         elif survey.visibility == "AUTH":
             # Authentication required
@@ -1706,7 +2003,9 @@ class SurveyResponseSubmissionView(APIView):
             validated_data = serializer.validated_data
             survey_id = validated_data['survey_id']
             token = validated_data.get('token')
+            password = validated_data.get('password')
             email = validated_data.get('email')
+            phone = validated_data.get('phone')
             answers_data = validated_data['answers']
             
             # Get survey
@@ -1720,8 +2019,8 @@ class SurveyResponseSubmissionView(APIView):
                 )
             
             # Validate access
-            has_access, user_or_email, error_msg = self._validate_survey_access(
-                request, survey, token, email
+            has_access, user_or_contact, error_msg = self._validate_survey_access(
+                request, survey, token, password, email, phone
             )
             
             if not has_access:
@@ -1732,8 +2031,9 @@ class SurveyResponseSubmissionView(APIView):
                 )
             
             # Determine respondent details for duplicate check
-            respondent = user_or_email if isinstance(user_or_email, User) else None
-            respondent_email = email if isinstance(user_or_email, str) else None
+            respondent = user_or_contact if isinstance(user_or_contact, User) else None
+            respondent_email = user_or_contact if isinstance(user_or_contact, str) and '@' in user_or_contact else None
+            respondent_phone = user_or_contact if isinstance(user_or_contact, str) and '@' not in user_or_contact else None
             
             # Check for duplicate submissions
             existing_response = None
@@ -1761,6 +2061,12 @@ class SurveyResponseSubmissionView(APIView):
                         existing_response = user_response
                 except User.DoesNotExist:
                     pass
+            elif respondent_phone:
+                # Check by phone for anonymous users
+                existing_response = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent_phone=respondent_phone
+                ).first()
             
             if existing_response:
                 return uniform_response(
@@ -1778,7 +2084,8 @@ class SurveyResponseSubmissionView(APIView):
                 survey=survey,
                 respondent=respondent,
                 ip_address=request.META.get('REMOTE_ADDR'),
-                respondent_email=respondent_email  # Store email for anonymous responses
+                respondent_email=respondent_email,  # Store email for anonymous responses
+                respondent_phone=respondent_phone   # Store phone for anonymous responses
             )
             
             # Create answers
@@ -2693,5 +3000,608 @@ class TokenSurveyDetailView(APIView):
             return uniform_response(
                 success=False,
                 message="Failed to retrieve survey details",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PasswordAccessValidationView(APIView):
+    """
+    Validate password-protected token and return survey information.
+    
+    POST /api/surveys/password-access/{token}/
+    Access: Public endpoint for token validation
+    """
+    
+    permission_classes = [AllowAny]
+    
+    def post(self, request, token):
+        """Validate token and password, return survey info"""
+        try:
+            password = request.data.get('password')
+            
+            if not password:
+                return uniform_response(
+                    success=False,
+                    message="Password is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Find the token
+            try:
+                access_token = PublicAccessToken.objects.get(
+                    token=token,
+                    is_active=True,
+                    password__isnull=False  # Must be password-protected
+                )
+            except PublicAccessToken.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Invalid or non-password-protected token",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check if token is expired
+            if not access_token.is_valid():
+                return uniform_response(
+                    success=False,
+                    message="Token has expired",
+                    status_code=status.HTTP_401_UNAUTHORIZED
+                )
+            
+            # Validate password
+            if not access_token.validate_password(password):
+                return uniform_response(
+                    success=False,
+                    message="Invalid password",
+                    status_code=status.HTTP_401_UNAUTHORIZED
+                )
+            
+            # Get survey and check if it's active
+            survey = access_token.survey
+            
+            if not survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Survey is not active",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            if not survey.is_currently_active():
+                return uniform_response(
+                    success=False,
+                    message=get_arabic_status_message(survey),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Return survey information
+            survey_data = {
+                'survey_id': str(survey.id),
+                'survey_title': survey.title,
+                'survey_description': survey.description,
+                'has_access': True,
+                'is_password_protected': True,
+                'is_contact_restricted': access_token.is_contact_restricted(),
+                'token_expires_at': access_token.expires_at.isoformat(),
+                'access_instructions': {
+                    'survey_endpoint': f'/api/surveys/password-surveys/{survey.id}/',
+                    'submission_endpoint': '/api/surveys/password-responses/',
+                    'required_headers': {
+                        'Authorization': f'Bearer {token}'
+                    },
+                    'required_fields': ['password']
+                }
+            }
+            
+            # Add contact restrictions if any
+            restricted_emails = access_token.get_restricted_emails()
+            restricted_phones = access_token.get_restricted_phones()
+            if restricted_emails:
+                survey_data['restricted_email'] = restricted_emails
+                survey_data['access_instructions']['required_fields'].append('email')
+            if restricted_phones:
+                survey_data['restricted_phone'] = restricted_phones  
+                survey_data['access_instructions']['required_fields'].append('phone')
+            
+            return uniform_response(
+                success=True,
+                message="Token and password validated successfully",
+                data=survey_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error validating password access: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to validate access",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PasswordProtectedSurveyView(APIView):
+    """
+    Retrieve survey details for password-protected public access.
+    
+    GET /api/surveys/password-surveys/{survey_id}/
+    Access: Requires token and password via Authorization: Bearer <token> and password in body
+    """
+    
+    permission_classes = [AllowAny]  # Handle validation manually
+    
+    def _validate_password_token_access(self, request, survey_id, password, email=None, phone=None):
+        """Validate token and password only (no contact restrictions)"""
+        auth_header = request.META.get('HTTP_AUTHORIZATION')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return None, None, "Authorization header with Bearer token is required"
+        
+        token = auth_header.split(' ')[1]
+        
+        try:
+            # Get survey first
+            survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            
+            # Validate token access to this specific survey
+            access_token = PublicAccessToken.objects.get(
+                token=token,
+                survey=survey,
+                is_active=True,
+                password__isnull=False  # Must be a password-protected token
+            )
+            
+            if not access_token.is_valid():
+                return None, None, "Token has expired"
+            
+            # Validate password
+            if not access_token.validate_password(password):
+                return None, None, "Invalid password"
+            
+            # No contact restrictions validation - handled in separate API
+            
+            if not survey.is_active:
+                return None, None, "Survey is not active"
+            
+            if not survey.is_currently_active():
+                return None, None, get_arabic_status_message(survey)
+            
+            return access_token, survey, None
+            
+        except Survey.DoesNotExist:
+            return None, None, "Survey not found"
+        except PublicAccessToken.DoesNotExist:
+            return None, None, "Token does not have password-protected access to this survey"
+    
+    def post(self, request, survey_id):
+        """Get survey details with password validation"""
+        try:
+            password = request.data.get('password')
+            email = request.data.get('email')
+            phone = request.data.get('phone')
+            
+            if not password:
+                return uniform_response(
+                    success=False,
+                    message="Password is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            access_token, survey, error_msg = self._validate_password_token_access(
+                request, survey_id, password, email, phone
+            )
+            
+            if error_msg:
+                return uniform_response(
+                    success=False,
+                    message=error_msg,
+                    status_code=status.HTTP_401_UNAUTHORIZED if "password" in error_msg.lower() or "token" in error_msg.lower() else status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get all questions with complete data
+            questions = survey.questions.all().order_by('order')
+            question_serializer = QuestionSerializer(questions, many=True)
+            
+            # Check if user has already submitted a response
+            has_submitted = False
+            if request.user.is_authenticated:
+                has_submitted = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent=request.user
+                ).exists()
+            elif email:
+                # Check by email for anonymous users
+                has_submitted = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent_email=email
+                ).exists()
+            elif phone:
+                # Check by phone for anonymous users
+                has_submitted = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent_phone=phone
+                ).exists()
+            
+            survey_data = {
+                'id': str(survey.id),
+                'title': survey.title,
+                'description': survey.description,
+                'visibility': survey.visibility,
+                'is_active': survey.is_active,
+                'is_locked': survey.is_locked,
+                'estimated_time': max(survey.questions.count() * 1, 5),
+                'questions_count': survey.questions.count(),
+                'created_at': survey.created_at.isoformat(),
+                'updated_at': survey.updated_at.isoformat(),
+                'creator_email': survey.creator.email,
+                'questions': question_serializer.data,
+                'access_info': {
+                    'access_type': 'password_token',
+                    'token_expires_at': access_token.expires_at.isoformat(),
+                    'is_password_protected': True,
+                    'can_submit': not has_submitted,
+                    'has_submitted': has_submitted,
+                    'submission_instructions': {
+                        'endpoint': '/api/surveys/password-responses/',
+                        'method': 'POST',
+                        'required_fields': ['survey_id', 'token', 'password', 'answers'],
+                        'optional_fields': {
+                            'email': 'For anonymous tracking',
+                            'phone': 'For anonymous tracking'
+                        }
+                    }
+                },
+                'submission_guidelines': {
+                    'password_required': True,
+                    'authentication_required': False,  # Password replaces authentication requirement
+                    'answer_format': {
+                        'question_id': 'UUID of the question',
+                        'answer': 'Your answer text/value'
+                    }
+                }
+            }
+            
+            return uniform_response(
+                success=True,
+                message="Survey details retrieved successfully",
+                data=survey_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error retrieving password-protected survey details: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to retrieve survey details",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PasswordProtectedSurveyResponseView(APIView):
+    """
+    Handle password-protected survey response submissions.
+    
+    POST /api/surveys/password-responses/
+    Access: Requires token, password, and optionally email/phone
+    """
+    
+    permission_classes = [AllowAny]  # Handle validation manually
+    
+    def _validate_password_survey_access(self, request, survey, token, password, email=None, phone=None):
+        """
+        Validate password-protected access to survey
+        Returns tuple: (has_access, user_or_contact, error_message)
+        """
+        # Check if survey is currently active based on dates
+        if not survey.is_currently_active():
+            status_message = f"Survey is {survey.get_status()}"
+            return False, None, status_message
+        
+        # Validate password-protected token access
+        try:
+            access_token = PublicAccessToken.objects.get(
+                token=token,
+                survey=survey,
+                is_active=True,
+                password__isnull=False  # Must be password-protected
+            )
+            
+            if not access_token.is_valid():
+                return False, None, "Token has expired"
+            
+            # Validate password
+            if not access_token.validate_password(password):
+                return False, None, "Invalid password"
+            
+            # Validate contact restrictions
+            if not access_token.validate_contact(email, phone):
+                restricted_emails = access_token.get_restricted_emails()
+                restricted_phones = access_token.get_restricted_phones()
+                if restricted_emails:
+                    return False, None, "This token is restricted"
+                elif restricted_phones:
+                    return False, None, "This token is restricted"
+                else:
+                    return False, None, "Contact validation failed"
+            
+            # Determine the user/contact for response tracking
+            if request.user.is_authenticated:
+                return True, request.user, None
+            else:
+                # For anonymous users, require email or phone
+                restricted_emails = access_token.get_restricted_emails()
+                restricted_phones = access_token.get_restricted_phones()
+                if restricted_emails:
+                    return True, email, None  # Use the provided email (already validated above)
+                elif restricted_phones:
+                    return True, phone, None  # Use the provided phone (already validated above)
+                elif email:
+                    return True, email, None
+                elif phone:
+                    return True, phone, None
+                else:
+                    return False, None, "Email or phone number is required for anonymous access"
+            
+        except PublicAccessToken.DoesNotExist:
+            return False, None, "Invalid or unauthorized token for password-protected access"
+    
+    def post(self, request):
+        """Submit response for password-protected survey"""
+        try:
+            # Extract required fields
+            survey_id = request.data.get('survey_id')
+            token = request.data.get('token')
+            password = request.data.get('password')
+            email = request.data.get('email')
+            phone = request.data.get('phone')
+            answers_data = request.data.get('answers', [])
+            
+            # Validate required fields
+            if not survey_id:
+                return uniform_response(
+                    success=False,
+                    message="Survey ID is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not token:
+                return uniform_response(
+                    success=False,
+                    message="Token is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not password:
+                return uniform_response(
+                    success=False,
+                    message="Password is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not answers_data:
+                return uniform_response(
+                    success=False,
+                    message="Answers are required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get survey
+            try:
+                survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            except Survey.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Survey not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Validate password-protected access
+            has_access, user_or_contact, error_msg = self._validate_password_survey_access(
+                request, survey, token, password, email, phone
+            )
+            
+            if not has_access:
+                return uniform_response(
+                    success=False,
+                    message=error_msg or "Access denied",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Determine respondent details for duplicate check
+            respondent = user_or_contact if isinstance(user_or_contact, User) else None
+            respondent_email = user_or_contact if isinstance(user_or_contact, str) and '@' in user_or_contact else None
+            respondent_phone = user_or_contact if isinstance(user_or_contact, str) and '@' not in user_or_contact else None
+            
+            # Check for duplicate submissions
+            existing_response = None
+            if respondent:
+                # Check by authenticated user
+                existing_response = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent=respondent
+                ).first()
+            elif respondent_email:
+                # Check by email for anonymous users
+                existing_response = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent_email=respondent_email
+                ).first()
+            elif respondent_phone:
+                # Check by phone for anonymous users
+                existing_response = SurveyResponse.objects.filter(
+                    survey=survey,
+                    respondent_phone=respondent_phone
+                ).first()
+            
+            if existing_response:
+                return uniform_response(
+                    success=False,
+                    message="You have already submitted a response to this survey",
+                    status_code=status.HTTP_409_CONFLICT
+                )
+            
+            # Create response
+            response = SurveyResponse.objects.create(
+                survey=survey,
+                respondent=respondent,
+                respondent_email=respondent_email,
+                respondent_phone=respondent_phone
+            )
+            
+            # Process answers
+            created_answers = []
+            for answer_data in answers_data:
+                question_id = answer_data.get('question_id')
+                answer_text = answer_data.get('answer')
+                
+                if not question_id or answer_text is None:
+                    response.delete()  # Clean up
+                    return uniform_response(
+                        success=False,
+                        message="Each answer must include question_id and answer",
+                        status_code=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                try:
+                    question = Question.objects.get(id=question_id, survey=survey)
+                    
+                    # Validate required questions
+                    if question.is_required and not str(answer_text).strip():
+                        response.delete()  # Clean up
+                        return uniform_response(
+                            success=False,
+                            message=f"Question '{question.text}' is required",
+                            status_code=status.HTTP_400_BAD_REQUEST
+                        )
+                    
+                    # Create answer
+                    answer = Answer.objects.create(
+                        question=question,
+                        response=response,
+                        answer_text=str(answer_text)
+                    )
+                    created_answers.append(answer)
+                    
+                except Question.DoesNotExist:
+                    response.delete()  # Clean up
+                    return uniform_response(
+                        success=False,
+                        message=f"Question {question_id} not found in this survey",
+                        status_code=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            logger.info(f"Password-protected survey response submitted for survey {survey.id}")
+            
+            return uniform_response(
+                success=True,
+                message="Survey response submitted successfully",
+                data={
+                    'response_id': str(response.id),
+                    'survey_id': str(survey.id),
+                    'submitted_at': response.submitted_at.isoformat(),
+                    'answers_count': len(created_answers),
+                    'access_type': 'password_token'
+                },
+                status_code=status.HTTP_201_CREATED
+            )
+            
+        except Exception as e:
+            logger.error(f"Error submitting password-protected survey response: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to submit response",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PasswordAccessValidationView(APIView):
+    """
+    Validate password access by token and return basic survey information.
+    
+    POST /api/surveys/password-access/{token}/
+    Access: Public endpoint for password validation
+    """
+    
+    permission_classes = [AllowAny]
+    
+    def post(self, request, token):
+        """Validate token and password, return survey basic info"""
+        try:
+            password = request.data.get('password')
+            
+            if not password:
+                return uniform_response(
+                    success=False,
+                    message="Password is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                # Find the password-protected token
+                access_token = PublicAccessToken.objects.get(
+                    token=token,
+                    is_active=True,
+                    password__isnull=False  # Must be password-protected
+                )
+                
+                if not access_token.is_valid():
+                    return uniform_response(
+                        success=False,
+                        message="Token has expired",
+                        status_code=status.HTTP_401_UNAUTHORIZED
+                    )
+                
+                # Validate password
+                if not access_token.validate_password(password):
+                    return uniform_response(
+                        success=False,
+                        message="Invalid password",
+                        status_code=status.HTTP_401_UNAUTHORIZED
+                    )
+                
+                # Get survey info
+                survey = access_token.survey
+                
+                if not survey.is_active or not survey.is_currently_active():
+                    return uniform_response(
+                        success=False,
+                        message=get_arabic_status_message(survey),
+                        status_code=status.HTTP_403_FORBIDDEN
+                    )
+                
+                response_data = {
+                    'survey_id': str(survey.id),
+                    'survey_title': survey.title,
+                    'survey_description': survey.description,
+                    'has_access': True,
+                    'is_password_protected': True,
+                    'token_expires_at': access_token.expires_at.isoformat(),
+                    'access_instructions': {
+                        'survey_detail_endpoint': f'/api/surveys/password-surveys/{survey.id}/',
+                        'response_submission_endpoint': '/api/surveys/password-responses/',
+                        'required_headers': {
+                            'Authorization': f'Bearer {token}'
+                        },
+                        'required_fields': ['password', 'survey_id', 'token', 'answers'],
+                        'conditional_fields': {
+                            'email': 'Optional for anonymous tracking',
+                            'phone': 'Optional for anonymous tracking'
+                        }
+                    }
+                }
+                
+                return uniform_response(
+                    success=True,
+                    message="Password validation successful",
+                    data=response_data
+                )
+                
+            except PublicAccessToken.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Token not found or not password-protected",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+        except Exception as e:
+            logger.error(f"Error validating password access: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to validate access",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

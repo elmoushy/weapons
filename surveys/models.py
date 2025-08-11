@@ -188,6 +188,18 @@ class Survey(models.Model):
         help_text='Whether survey is active and accepting responses'
     )
     
+    # Public survey contact method settings
+    CONTACT_METHOD_CHOICES = [
+        ('email', 'Email'),
+        ('phone', 'Phone'),
+    ]
+    public_contact_method = models.CharField(
+        max_length=5,
+        choices=CONTACT_METHOD_CHOICES,
+        default='email',
+        help_text='Contact method required for public survey submissions (email or phone)'
+    )
+    
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -366,6 +378,12 @@ class Response(models.Model):
         blank=True,
         help_text='Email for anonymous responses (when respondent is null)'
     )
+    respondent_phone = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        help_text='Phone for anonymous responses (when respondent is null)'
+    )
     
     # Response metadata
     submitted_at = models.DateTimeField(auto_now_add=True)
@@ -398,15 +416,25 @@ class Response(models.Model):
             if existing.exists():
                 raise ValidationError("You have already submitted a response to this survey.")
         
-        # Check for anonymous user duplicate responses (same email)
-        elif self.respondent_email:
-            existing = Response.objects.filter(
-                survey=self.survey,
-                respondent__isnull=True,
-                respondent_email=self.respondent_email
-            ).exclude(pk=self.pk)
-            if existing.exists():
-                raise ValidationError("A response has already been submitted with this email address.")
+        # Check for anonymous user duplicate responses (same email or phone based on survey settings)
+        elif self.respondent_email or self.respondent_phone:
+            # Determine which contact method to check based on survey settings
+            if self.survey.public_contact_method == 'email' and self.respondent_email:
+                existing = Response.objects.filter(
+                    survey=self.survey,
+                    respondent__isnull=True,
+                    respondent_email=self.respondent_email
+                ).exclude(pk=self.pk)
+                if existing.exists():
+                    raise ValidationError("A response has already been submitted with this email address.")
+            elif self.survey.public_contact_method == 'phone' and self.respondent_phone:
+                existing = Response.objects.filter(
+                    survey=self.survey,
+                    respondent__isnull=True,
+                    respondent_phone=self.respondent_phone
+                ).exclude(pk=self.pk)
+                if existing.exists():
+                    raise ValidationError("A response has already been submitted with this phone number.")
 
     def save(self, *args, **kwargs):
         """Override save to call clean validation."""
@@ -480,6 +508,23 @@ class PublicAccessToken(models.Model):
         default=True,
         help_text='Whether token is active'
     )
+    # Password protection fields
+    password = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        help_text='Password for accessing the survey via this token'
+    )
+    restricted_email = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Comma-separated list of emails that can use the token'
+    )
+    restricted_phone = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Comma-separated list of phone numbers that can use the token'
+    )
     
     class Meta:
         db_table = 'surveys_public_access_token'
@@ -499,8 +544,89 @@ class PublicAccessToken(models.Model):
         """Check if token is valid (active and not expired)"""
         return self.is_active and not self.is_expired()
     
+    def is_password_protected(self):
+        """Check if token requires a password"""
+        return bool(self.password)
+    
+    def is_contact_restricted(self):
+        """Check if token is restricted to specific emails or phones"""
+        return bool(self.get_restricted_emails() or self.get_restricted_phones())
+    
+    def get_restricted_emails(self):
+        """Get list of restricted emails"""
+        if not self.restricted_email:
+            return []
+        return [email.strip() for email in self.restricted_email.split(',') if email.strip()]
+    
+    def set_restricted_emails(self, email_list):
+        """Set restricted emails from a list"""
+        if email_list:
+            self.restricted_email = ','.join(email_list)
+        else:
+            self.restricted_email = ''
+    
+    def get_restricted_phones(self):
+        """Get list of restricted phones"""
+        if not self.restricted_phone:
+            return []
+        return [phone.strip() for phone in self.restricted_phone.split(',') if phone.strip()]
+    
+    def set_restricted_phones(self, phone_list):
+        """Set restricted phones from a list"""
+        if phone_list:
+            self.restricted_phone = ','.join(phone_list)
+        else:
+            self.restricted_phone = ''
+    
+    def validate_password(self, password):
+        """Validate the provided password against the token's password"""
+        if not self.is_password_protected():
+            return True  # No password required
+        return self.password == password
+    
+    def validate_contact(self, email=None, phone=None):
+        """Validate the provided contact info against restrictions"""
+        if not self.is_contact_restricted():
+            return True  # No contact restrictions
+        
+        # Get the restricted lists
+        restricted_emails = self.get_restricted_emails()
+        restricted_phones = self.get_restricted_phones()
+        
+        # If there are restricted emails, check email validation
+        if restricted_emails:
+            if email and email.lower() in [e.lower() for e in restricted_emails]:
+                return True  # Email matches restriction
+            elif not restricted_phones:
+                # Only emails are restricted and email doesn't match
+                return False
+        
+        # If there are restricted phones, check phone validation
+        if restricted_phones:
+            if phone and phone in restricted_phones:
+                return True  # Phone matches restriction
+            elif not restricted_emails:
+                # Only phones are restricted and phone doesn't match
+                return False
+        
+        # If both emails and phones are restricted, at least one must match
+        if restricted_emails and restricted_phones:
+            email_valid = email and email.lower() in [e.lower() for e in restricted_emails]
+            phone_valid = phone and phone in restricted_phones
+            return email_valid or phone_valid
+        
+        return False
+    
     @classmethod
     def generate_token(cls):
         """Generate a unique token string"""
         import secrets
         return secrets.token_urlsafe(32)
+    
+    @classmethod
+    def generate_password(cls):
+        """Generate a random password"""
+        import secrets
+        import string
+        alphabet = string.ascii_letters + string.digits
+        return ''.join(secrets.choice(alphabet) for _ in range(8))
