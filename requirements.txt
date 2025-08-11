@@ -28,7 +28,13 @@ pytz==2025.2  # For timezone handling
 # Database drivers
 oracledb==3.3.0  # Oracle database driver
 
+
 # New packages for news service
 django-filter>=24.0.0  # For advanced filtering
 pillow-heif>=0.10.0  # For HEIF image support
 pillow-simd>=9.0.0  # Faster image processing (optional)
+
+# Development and debugging tools
+django_extensions
+Werkzeug
+pyOpenSSL
