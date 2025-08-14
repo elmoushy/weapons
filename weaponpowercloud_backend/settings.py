@@ -76,6 +76,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'authentication.middleware.UniversalAuthMiddleware',  # Ensure JWT compatibility
     'django.contrib.messages.middleware.MessageMiddleware',
+    # Emirates timezone middleware - forces Asia/Dubai timezone for all requests
+    'weaponpowercloud_backend.middleware.emirates_timezone.EmiratesTimezoneMiddleware',
     'news_service.middleware.NewsEncryptionMiddleware',
     'news_service.middleware.NewsLoggingMiddleware',
     'news_service.middleware.NewsSecurityMiddleware',
@@ -161,7 +163,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Emirates (UAE) timezone - Asia/Dubai
+TIME_ZONE = 'Asia/Dubai'
 
 USE_I18N = True
 
