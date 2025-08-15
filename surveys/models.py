@@ -28,6 +28,21 @@ except ImportError:
     OracleCompatibleQuestionManager = models.Manager
 
 
+# Import timezone utilities to maintain consistent UAE timezone handling
+try:
+    from .timezone_utils import ensure_uae_timezone, now_uae, is_currently_active_uae, get_status_uae
+except ImportError:
+    # Fallback to basic timezone functions if timezone_utils not available
+    def ensure_uae_timezone(dt):
+        return dt
+    def now_uae():
+        return timezone.now()
+    def is_currently_active_uae(survey):
+        return survey.is_currently_active()
+    def get_status_uae(survey):
+        return survey.get_status()
+
+
 class EncryptedTextField(models.TextField):
     """Custom text field that automatically encrypts/decrypts data for surveys"""
     
@@ -266,16 +281,22 @@ class Survey(models.Model):
         return 'active'
     
     def save(self, *args, **kwargs):
-        """Override save to generate title hash and handle date logic"""
+        """Override save to generate title hash and handle date logic with UAE timezone"""
         if self.title:
             self.title_hash = hashlib.sha256(self.title.encode('utf-8')).hexdigest()
         
         # If only end_date is provided, set start_date to created_at (or now if updating)
         if self.end_date and not self.start_date:
             if not self.pk:  # New survey
-                self.start_date = timezone.now()
+                self.start_date = now_uae()
             elif not self.start_date:  # Existing survey without start_date
-                self.start_date = self.created_at or timezone.now()
+                self.start_date = ensure_uae_timezone(self.created_at) if self.created_at else now_uae()
+        
+        # Ensure start_date and end_date are in UAE timezone
+        if self.start_date:
+            self.start_date = ensure_uae_timezone(self.start_date)
+        if self.end_date:
+            self.end_date = ensure_uae_timezone(self.end_date)
         
         # If no end_date is provided, survey runs indefinitely until deactivated
         # This is handled by the is_currently_active() method which only checks end_date if it exists

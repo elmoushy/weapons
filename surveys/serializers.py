@@ -8,11 +8,22 @@ with comprehensive validation and encryption support.
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Survey, Question, Response, Answer
+from .timezone_utils import serialize_datetime_uae, get_status_uae, is_currently_active_uae
 import json
 import logging
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+class UAEDateTimeField(serializers.DateTimeField):
+    """
+    Custom DateTimeField that always serializes in UAE timezone
+    """
+    
+    def to_representation(self, value):
+        """Serialize datetime in UAE timezone"""
+        return serialize_datetime_uae(value)
 
 
 class QuestionSerializer(serializers.ModelSerializer):
@@ -108,10 +119,15 @@ class AnswerSerializer(serializers.ModelSerializer):
 
 
 class ResponseSerializer(serializers.ModelSerializer):
-    """Serializer for survey responses with nested answers"""
+    """Serializer for survey responses with nested answers and UAE timezone"""
     
     answers = AnswerSerializer(many=True, read_only=True)
     respondent_email = serializers.SerializerMethodField()
+    
+    # Use UAE timezone for datetime fields
+    submitted_at = UAEDateTimeField(read_only=True)
+    created_at = UAEDateTimeField(read_only=True)
+    updated_at = UAEDateTimeField(read_only=True)
     
     class Meta:
         model = Response
@@ -135,7 +151,7 @@ class ResponseSerializer(serializers.ModelSerializer):
 
 class SurveySerializer(serializers.ModelSerializer):
     """
-    Main survey serializer with role-based field filtering.
+    Main survey serializer with role-based field filtering and UAE timezone handling.
     Follows the same patterns as news_service serializers.
     """
     
@@ -145,6 +161,12 @@ class SurveySerializer(serializers.ModelSerializer):
     shared_with_emails = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     is_currently_active = serializers.SerializerMethodField()
+    
+    # Use custom UAE timezone fields for date/time serialization
+    start_date = UAEDateTimeField(required=False, allow_null=True)
+    end_date = UAEDateTimeField(required=False, allow_null=True)
+    created_at = UAEDateTimeField(read_only=True)
+    updated_at = UAEDateTimeField(read_only=True)
     
     class Meta:
         model = Survey
@@ -170,12 +192,12 @@ class SurveySerializer(serializers.ModelSerializer):
         return [user.email for user in obj.shared_with.all()]
     
     def get_status(self, obj):
-        """Get current status of the survey"""
-        return obj.get_status()
+        """Get current status of the survey using UAE timezone"""
+        return get_status_uae(obj)
     
     def get_is_currently_active(self, obj):
-        """Check if survey is currently active based on dates"""
-        return obj.is_currently_active()
+        """Check if survey is currently active based on dates using UAE timezone"""
+        return is_currently_active_uae(obj)
     
     def validate(self, data):
         """Validate survey data including date logic"""

@@ -31,6 +31,10 @@ from .permissions import (
     IsCreatorOrVisible, IsCreatorOrReadOnly, 
     CanSubmitResponse, IsCreatorOrStaff
 )
+from .timezone_utils import (
+    format_uae_datetime, format_uae_date_only, get_status_uae, 
+    is_currently_active_uae, serialize_datetime_uae
+)
 import logging
 import json
 import csv
@@ -43,26 +47,15 @@ User = get_user_model()
 
 def get_arabic_status_message(survey):
     """
-    Generate Arabic status messages with proper date and time formatting for surveys
+    Generate Arabic status messages with proper date and time formatting for surveys in UAE timezone
     """
-    status = survey.get_status()
+    status = get_status_uae(survey)
     
-    # Helper function to format dates and times in Arabic
-    def format_datetime_arabic(date):
-        if not date:
-            return None
-        # Format as: YYYY-MM-DD HH:MM (24-hour format)
-        return date.strftime('%Y-%m-%d %H:%M')
-    
-    def format_date_only_arabic(date):
-        if not date:
-            return None
-        return date.strftime('%Y-%m-%d')
-    
-    start_datetime_str = format_datetime_arabic(survey.start_date)
-    end_datetime_str = format_datetime_arabic(survey.end_date)
-    start_date_str = format_date_only_arabic(survey.start_date)
-    end_date_str = format_date_only_arabic(survey.end_date)
+    # Use UAE timezone utilities for consistent formatting
+    start_datetime_str = format_uae_datetime(survey.start_date)
+    end_datetime_str = format_uae_datetime(survey.end_date)
+    start_date_str = format_uae_date_only(survey.start_date)
+    end_date_str = format_uae_date_only(survey.end_date)
     
     if status == 'scheduled':
         if start_datetime_str and end_datetime_str:
@@ -1818,17 +1811,17 @@ class SurveyViewSet(ModelViewSet):
                 if not survey.is_active or survey.deleted_at is not None:
                     raise PublicAccessToken.DoesNotExist
                 
-                # Check if survey is currently active based on dates
-                if not survey.is_currently_active():
+                # Check if survey is currently active based on dates using UAE timezone
+                if not is_currently_active_uae(survey):
                     arabic_message = get_arabic_status_message(survey)
                     return uniform_response(
                         success=False,
                         message=arabic_message,
                         data={
                             'has_access': False,
-                            'survey_status': survey.get_status(),
-                            'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                            'end_date': survey.end_date.isoformat() if survey.end_date else None
+                            'survey_status': get_status_uae(survey),
+                            'start_date': serialize_datetime_uae(survey.start_date),
+                            'end_date': serialize_datetime_uae(survey.end_date)
                         },
                         status_code=status.HTTP_403_FORBIDDEN
                     )
@@ -1891,16 +1884,16 @@ class SurveyViewSet(ModelViewSet):
             survey = self.get_object()
             user = request.user
             
-            # Check if survey is currently active based on dates
-            if not survey.is_currently_active():
+            # Check if survey is currently active based on dates using UAE timezone
+            if not is_currently_active_uae(survey):
                 arabic_message = get_arabic_status_message(survey)
                 return uniform_response(
                     success=False,
                     message=arabic_message,
                     data={
-                        'survey_status': survey.get_status(),
-                        'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                        'end_date': survey.end_date.isoformat() if survey.end_date else None
+                        'survey_status': get_status_uae(survey),
+                        'start_date': serialize_datetime_uae(survey.start_date),
+                        'end_date': serialize_datetime_uae(survey.end_date)
                     },
                     status_code=status.HTTP_403_FORBIDDEN
                 )
@@ -1933,10 +1926,10 @@ class SurveyViewSet(ModelViewSet):
                 'title': survey.title,
                 'description': survey.description,
                 'visibility': survey.visibility,
-                'status': survey.get_status(),
-                'is_currently_active': survey.is_currently_active(),
-                'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                'end_date': survey.end_date.isoformat() if survey.end_date else None,
+                'status': get_status_uae(survey),
+                'is_currently_active': is_currently_active_uae(survey),
+                'start_date': serialize_datetime_uae(survey.start_date),
+                'end_date': serialize_datetime_uae(survey.end_date),
                 'estimated_time': max(survey.questions.count() * 1, 5),  # 1 min per question, min 5 min
                 'questions_count': survey.questions.count(),
                 'questions': question_serializer.data
@@ -2169,12 +2162,12 @@ class MySharedSurveysView(generics.ListAPIView):
                     'reason': access_reason,
                     'is_active': survey.is_active,
                     'is_locked': survey.is_locked,
-                    'status': survey.get_status(),
-                    'is_currently_active': survey.is_currently_active(),
-                    'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                    'end_date': survey.end_date.isoformat() if survey.end_date else None,
-                    'created_at': survey.created_at.isoformat(),
-                    'updated_at': survey.updated_at.isoformat(),
+                    'status': get_status_uae(survey),
+                    'is_currently_active': is_currently_active_uae(survey),
+                    'start_date': serialize_datetime_uae(survey.start_date),
+                    'end_date': serialize_datetime_uae(survey.end_date),
+                    'created_at': serialize_datetime_uae(survey.created_at),
+                    'updated_at': serialize_datetime_uae(survey.updated_at),
                     'creator': {
                         'id': survey.creator.id,
                         'email': survey.creator.email,
@@ -2184,7 +2177,7 @@ class MySharedSurveysView(generics.ListAPIView):
                     'estimated_time': max(survey.questions.count() * 1, 5),
                     'access_info': {
                         'access_type': survey.visibility,
-                        'can_submit': not has_submitted and survey.is_currently_active() and not survey.is_locked,
+                        'can_submit': not has_submitted and is_currently_active_uae(survey) and not survey.is_locked,
                         'has_submitted': has_submitted,
                         'is_shared_explicitly': survey.visibility == 'PRIVATE',
                         'is_shared_via_group': survey.visibility == 'GROUPS',
@@ -2391,16 +2384,16 @@ class AuthenticatedSurveyResponseView(APIView):
                     status_code=status.HTTP_404_NOT_FOUND
                 )
             
-            # Check if survey is currently active based on dates
-            if not survey.is_currently_active():
-                status_message = f"Survey is {survey.get_status()}"
+            # Check if survey is currently active based on dates using UAE timezone
+            if not is_currently_active_uae(survey):
+                status_message = f"Survey is {get_status_uae(survey)}"
                 return uniform_response(
                     success=False,
                     message=status_message,
                     data={
-                        'survey_status': survey.get_status(),
-                        'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                        'end_date': survey.end_date.isoformat() if survey.end_date else None
+                        'survey_status': get_status_uae(survey),
+                        'start_date': serialize_datetime_uae(survey.start_date),
+                        'end_date': serialize_datetime_uae(survey.end_date)
                     },
                     status_code=status.HTTP_400_BAD_REQUEST
                 )
@@ -2506,12 +2499,12 @@ class SurveyResponseSubmissionView(APIView):
     
     def _validate_survey_access(self, request, survey, token=None, password=None, email=None, phone=None):
         """
-        Validate access to survey based on visibility and provided credentials
+        Validate access to survey based on visibility and provided credentials using UAE timezone
         Returns tuple: (has_access, user_or_email_or_phone, error_message)
         """
-        # Check if survey is currently active based on dates
-        if not survey.is_currently_active():
-            status_message = f"Survey is {survey.get_status()}"
+        # Check if survey is currently active based on dates using UAE timezone
+        if not is_currently_active_uae(survey):
+            status_message = f"Survey is {get_status_uae(survey)}"
             return False, None, status_message
         
         # Handle public token access first
@@ -2793,16 +2786,16 @@ class SurveySubmissionView(APIView):
         try:
             survey = get_object_or_404(Survey, id=survey_id, deleted_at__isnull=True)
             
-            # Check if survey is currently active based on dates
-            if not survey.is_currently_active():
-                status_message = f"Survey is {survey.get_status()}"
+            # Check if survey is currently active based on dates using UAE timezone
+            if not is_currently_active_uae(survey):
+                status_message = f"Survey is {get_status_uae(survey)}"
                 return uniform_response(
                     success=False,
                     message=status_message,
                     data={
-                        'survey_status': survey.get_status(),
-                        'start_date': survey.start_date.isoformat() if survey.start_date else None,
-                        'end_date': survey.end_date.isoformat() if survey.end_date else None
+                        'survey_status': get_status_uae(survey),
+                        'start_date': serialize_datetime_uae(survey.start_date),
+                        'end_date': serialize_datetime_uae(survey.end_date)
                     },
                     status_code=status.HTTP_400_BAD_REQUEST
                 )
@@ -3511,7 +3504,7 @@ class TokenSurveyDetailView(APIView):
     permission_classes = [AllowAny]  # Handle token validation manually
     
     def _validate_token_access(self, request, survey_id):
-        """Validate token and survey access"""
+        """Validate token and survey access using UAE timezone"""
         auth_header = request.META.get('HTTP_AUTHORIZATION')
         if not auth_header or not auth_header.startswith('Bearer '):
             return None, None, "Authorization header with Bearer token is required"
@@ -3535,7 +3528,7 @@ class TokenSurveyDetailView(APIView):
             if not survey.is_active:
                 return None, None, "Survey is not active"
             
-            if not survey.is_currently_active():
+            if not is_currently_active_uae(survey):
                 return None, None, get_arabic_status_message(survey)
             
             return access_token, survey, None
@@ -3682,7 +3675,7 @@ class PasswordAccessValidationView(APIView):
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             
-            if not survey.is_currently_active():
+            if not is_currently_active_uae(survey):
                 return uniform_response(
                     success=False,
                     message=get_arabic_status_message(survey),
@@ -3697,7 +3690,7 @@ class PasswordAccessValidationView(APIView):
                 'has_access': True,
                 'is_password_protected': True,
                 'is_contact_restricted': access_token.is_contact_restricted(),
-                'token_expires_at': access_token.expires_at.isoformat(),
+                'token_expires_at': serialize_datetime_uae(access_token.expires_at),
                 'access_instructions': {
                     'survey_endpoint': f'/api/surveys/password-surveys/{survey.id}/',
                     'submission_endpoint': '/api/surveys/password-responses/',
@@ -3901,12 +3894,12 @@ class PasswordProtectedSurveyResponseView(APIView):
     
     def _validate_password_survey_access(self, request, survey, token, password, email=None, phone=None):
         """
-        Validate password-protected access to survey
+        Validate password-protected access to survey using UAE timezone
         Returns tuple: (has_access, user_or_contact, error_message)
         """
-        # Check if survey is currently active based on dates
-        if not survey.is_currently_active():
-            status_message = f"Survey is {survey.get_status()}"
+        # Check if survey is currently active based on dates using UAE timezone
+        if not is_currently_active_uae(survey):
+            status_message = f"Survey is {get_status_uae(survey)}"
             return False, None, status_message
         
         # Validate password-protected token access
