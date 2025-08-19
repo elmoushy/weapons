@@ -128,6 +128,8 @@ DATABASES = {
         'PORT': os.getenv('ORACLE_PORT'),
         'OPTIONS': {
             # Oracle-specific connection options
+            # Character set mismatch should be handled at Oracle database level
+            # Keep it simple to avoid connection parameter errors
         },
     }
 }
@@ -137,6 +139,11 @@ SILENCED_SYSTEM_CHECKS = [
     'fields.E007',  # Ignore Oracle field name length warnings
     'models.W037',  # Ignore Oracle conditional index warnings
 ]
+
+# Set Oracle NLS_LANG environment variable for character set handling
+import os
+# This helps resolve Oracle character set mismatch issues
+os.environ.setdefault('NLS_LANG', 'AMERICAN_AMERICA.AL32UTF8')
 
 
 # Password validation

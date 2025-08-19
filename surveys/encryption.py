@@ -49,7 +49,7 @@ class SurveysDataEncryption:
         Encrypt data using AES-256.
         
         Args:
-            data (str): Data to encrypt
+            data: Data to encrypt (will be converted to string)
             
         Returns:
             str: Encrypted data as string
@@ -62,7 +62,13 @@ class SurveysDataEncryption:
             return data
         
         try:
-            encrypted_data = self.cipher_suite.encrypt(data.encode())
+            # Convert data to string if it's not already a string
+            if not isinstance(data, str):
+                data_str = str(data)
+            else:
+                data_str = data
+            
+            encrypted_data = self.cipher_suite.encrypt(data_str.encode())
             return encrypted_data.decode()
         except Exception as e:
             logger.error(f"Encryption failed: {e}")
@@ -73,7 +79,7 @@ class SurveysDataEncryption:
         Decrypt data using AES-256.
         
         Args:
-            encrypted_data (str): Encrypted data to decrypt
+            encrypted_data: Encrypted data to decrypt (will be converted to string)
             
         Returns:
             str: Decrypted data
@@ -86,7 +92,13 @@ class SurveysDataEncryption:
             return encrypted_data
         
         try:
-            decrypted_data = self.cipher_suite.decrypt(encrypted_data.encode())
+            # Convert data to string if it's not already a string
+            if not isinstance(encrypted_data, str):
+                encrypted_data_str = str(encrypted_data)
+            else:
+                encrypted_data_str = encrypted_data
+            
+            decrypted_data = self.cipher_suite.decrypt(encrypted_data_str.encode())
             return decrypted_data.decode()
         except Exception as e:
             logger.error(f"Decryption failed: {e}")

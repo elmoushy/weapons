@@ -75,6 +75,9 @@ class EncryptedTextField(models.TextField):
         if not value:
             return value
         try:
+            # Ensure value is a string before encryption
+            if not isinstance(value, str):
+                value = str(value)
             return surveys_data_encryption.encrypt(value)
         except Exception as e:
             logger.error(f"Failed to encrypt text field: {e}")
@@ -113,6 +116,9 @@ class EncryptedCharField(models.CharField):
         if not value:
             return value
         try:
+            # Ensure value is a string before encryption
+            if not isinstance(value, str):
+                value = str(value)
             return surveys_data_encryption.encrypt(value)
         except Exception as e:
             logger.error(f"Failed to encrypt char field: {e}")
