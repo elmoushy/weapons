@@ -22,6 +22,9 @@ requests==2.32.4
 # Environment variables
 python-dotenv==1.1.1
 
+# Date utilities
+python-dateutil
+
 # Image processing
 Pillow>=10.0.0
 

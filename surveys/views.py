@@ -21,6 +21,7 @@ import logging
 import json
 import csv
 import io
+import math
 from datetime import timedelta
 from collections import defaultdict, Counter
 from statistics import median, mean
@@ -1791,8 +1792,30 @@ class SurveyViewSet(ModelViewSet):
         GET /api/surveys/surveys/{survey_id}/access/?token={token}
         """
         try:
-            survey = self.get_object()
+            # Get survey manually to avoid permission issues
+            try:
+                survey = Survey.objects.get(id=pk)
+            except Survey.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Survey not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
             token = request.query_params.get('token')
+            
+            # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+            if survey.status != 'submitted':
+                return uniform_response(
+                    success=False,
+                    message="This survey is not yet available for public access. Please contact the survey creator.",
+                    data={
+                        'has_access': False,
+                        'survey_status': 'draft',
+                        'reason': 'survey_not_submitted'
+                    },
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             # First check if survey is currently active based on dates
             if not survey.is_currently_active():
@@ -1939,6 +1962,19 @@ class SurveyViewSet(ModelViewSet):
                 # Check if survey is active and in valid date period
                 if not survey.is_active or survey.deleted_at is not None:
                     raise PublicAccessToken.DoesNotExist
+                
+                # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+                if survey.status != 'submitted':
+                    return uniform_response(
+                        success=False,
+                        message="This survey is not yet available for public access. Please contact the survey creator.",
+                        data={
+                            'has_access': False,
+                            'survey_status': 'draft',
+                            'reason': 'survey_not_submitted'
+                        },
+                        status_code=status.HTTP_403_FORBIDDEN
+                    )
                 
                 # Check if survey is currently active based on dates using UAE timezone
                 if not is_currently_active_uae(survey):
@@ -2150,6 +2186,579 @@ class SurveyViewSet(ModelViewSet):
                 message="Failed to share survey",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], 
+            url_path='(?P<survey_id>[^/.]+)/analytics/questions/(?P<question_id>[^/.]+)')
+    def question_analytics(self, request, survey_id=None, question_id=None):
+        """
+        Get detailed question-level analytics for surveys.
+        
+        GET /api/surveys/surveys/{survey_id}/analytics/questions/{question_id}/
+        Access: Survey Creator, Admin, Super Admin, or Staff only
+        
+        Query Parameters:
+        - start_date (ISO datetime): Filter responses from this date
+        - end_date (ISO datetime): Filter responses until this date  
+        - include_demographics (boolean, default: false): Include demographic breakdowns
+        """
+        try:
+            # Get survey without permission filtering first
+            try:
+                survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            except Survey.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Survey not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check permission for analytics access
+            user = request.user
+            if not (user.role in ['admin', 'super_admin'] or user == survey.creator):
+                return uniform_response(
+                    success=False,
+                    message="Access denied. Only admins, super admins, or survey creators can view question analytics.",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Get question
+            try:
+                question = survey.questions.get(id=question_id)
+            except Question.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Question not found in this survey",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Parse query parameters
+            params = self._parse_analytics_params(request)
+            
+            # Get filtered responses
+            responses = self._get_filtered_responses_for_analytics(survey, params)
+            
+            # Get answers for this question from filtered responses
+            question_answers = Answer.objects.filter(
+                question=question,
+                response__in=responses
+            ).select_related('response', 'response__respondent')
+            
+            # Build analytics data
+            analytics_data = {
+                'question': self._get_question_info_detailed(question),
+                'summary': self._calculate_question_summary(responses.count(), question_answers, params),
+                'distributions': self._calculate_question_distributions(question, question_answers, responses, params),
+                'statistics': self._calculate_question_statistics(question, question_answers),
+                'recent_responses': self._get_recent_responses(question_answers, params.get('include_demographics', False)),
+                'insights': self._generate_question_insights(question, question_answers, responses.count())
+            }
+            
+            return uniform_response(
+                success=True,
+                message="Question analytics retrieved successfully",
+                data=analytics_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating question analytics for question {question_id} in survey {survey_id}: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to generate question analytics",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _parse_analytics_params(self, request):
+        """Parse analytics query parameters"""
+        params = {
+            'start_date': None,
+            'end_date': None,
+            'include_demographics': False
+        }
+        
+        # Parse start_date
+        start_date_str = request.query_params.get('start_date')
+        if start_date_str:
+            try:
+                params['start_date'] = parse_datetime(start_date_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse end_date
+        end_date_str = request.query_params.get('end_date')
+        if end_date_str:
+            try:
+                params['end_date'] = parse_datetime(end_date_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse include_demographics
+        include_demographics = request.query_params.get('include_demographics', 'false').lower()
+        params['include_demographics'] = include_demographics in ['true', '1', 'yes']
+        
+        return params
+    
+    def _get_filtered_responses_for_analytics(self, survey, params):
+        """Get responses with date filtering for analytics"""
+        queryset = survey.responses.all()
+        
+        # Apply date filters
+        if params['start_date']:
+            queryset = queryset.filter(submitted_at__gte=params['start_date'])
+        if params['end_date']:
+            queryset = queryset.filter(submitted_at__lte=params['end_date'])
+        
+        return queryset
+    
+    def _get_question_info_detailed(self, question):
+        """Get detailed question information"""
+        question_info = {
+            'id': str(question.id),
+            'survey_id': str(question.survey.id),
+            'order': question.order,
+            'type': question.question_type,
+            'question_text': question.text,
+            'description': '',  # Add description field if needed
+            'is_required': question.is_required
+        }
+        
+        # Add options for choice questions
+        if question.question_type in ['single_choice', 'multiple_choice'] and question.options:
+            try:
+                options = json.loads(question.options)
+                question_info['options'] = [
+                    {
+                        'id': opt.get('value', opt) if isinstance(opt, dict) else str(i),
+                        'label': opt.get('label', opt) if isinstance(opt, dict) else opt,
+                        'order': i + 1
+                    }
+                    for i, opt in enumerate(options)
+                ]
+            except (json.JSONDecodeError, TypeError):
+                question_info['options'] = []
+        
+        return question_info
+    
+    def _calculate_question_summary(self, total_responses, question_answers, params):
+        """Calculate question summary statistics"""
+        answered_count = question_answers.count()
+        skipped_count = total_responses - answered_count
+        answer_rate = answered_count / total_responses if total_responses > 0 else 0.0
+        skip_rate = skipped_count / total_responses if total_responses > 0 else 0.0
+        
+        # Get response timestamps
+        response_times = question_answers.values_list('response__submitted_at', flat=True)
+        
+        summary = {
+            'total_responses': total_responses,
+            'answered_count': answered_count,
+            'skipped_count': skipped_count,
+            'answer_rate': round(answer_rate, 3),
+            'skip_rate': round(skip_rate, 3),
+            'last_response_at': None,
+            'first_response_at': None
+        }
+        
+        if response_times:
+            summary['last_response_at'] = serialize_datetime_uae(max(response_times))
+            summary['first_response_at'] = serialize_datetime_uae(min(response_times))
+        
+        return summary
+    
+    def _calculate_question_distributions(self, question, question_answers, all_responses, params):
+        """Calculate question distributions"""
+        distributions = {}
+        
+        # Option distribution (for choice questions)
+        if question.question_type in ['single_choice', 'multiple_choice']:
+            distributions['by_option'] = self._get_option_distribution(question, question_answers)
+        elif question.question_type == 'rating':
+            distributions['by_rating'] = self._get_rating_distribution(question_answers)
+        elif question.question_type == 'yes_no':
+            distributions['by_choice'] = self._get_yes_no_distribution(question_answers)
+        elif question.question_type in ['text', 'textarea']:
+            distributions['textual_analysis'] = self._get_textual_analysis(question_answers, params.get('include_demographics', False))
+        
+        # Time distribution
+        distributions['by_time'] = self._get_time_distribution(question_answers)
+        
+        # Auth status distribution
+        distributions['by_auth_status'] = self._get_auth_status_distribution(question_answers, all_responses)
+        
+        return distributions
+    
+    def _get_option_distribution(self, question, question_answers):
+        """Get distribution for choice questions"""
+        try:
+            options = json.loads(question.options) if question.options else []
+        except (json.JSONDecodeError, TypeError):
+            options = []
+        
+        answer_texts = [answer.answer_text for answer in question_answers]
+        total_answered = len(answer_texts)
+        
+        option_counts = Counter()
+        
+        # For multiple choice, parse JSON arrays
+        if question.question_type == 'multiple_choice':
+            for answer_text in answer_texts:
+                try:
+                    if answer_text.startswith('['):
+                        selections = json.loads(answer_text)
+                    else:
+                        selections = [s.strip() for s in answer_text.split(',')]
+                    
+                    for selection in selections:
+                        if selection:
+                            option_counts[selection] += 1
+                except (json.JSONDecodeError, AttributeError):
+                    if answer_text:
+                        option_counts[answer_text] += 1
+        else:
+            # Single choice
+            option_counts = Counter(answer_texts)
+        
+        # Build distribution
+        option_distribution = []
+        for i, option in enumerate(options):
+            option_key = option.get('value', option) if isinstance(option, dict) else option
+            option_label = option.get('label', option) if isinstance(option, dict) else option
+            
+            count = option_counts.get(option_key, 0)
+            percentage = count / total_answered if total_answered > 0 else 0
+            
+            option_distribution.append({
+                'option_id': str(i),
+                'option_label': option_label,
+                'count': count,
+                'percentage': round(percentage, 3),
+                'rank': 0  # Will be set after sorting
+            })
+        
+        # Add "other" responses not in predefined options
+        predefined_values = {option.get('value', option) if isinstance(option, dict) else option for option in options}
+        for answer_text, count in option_counts.items():
+            if answer_text not in predefined_values:
+                percentage = count / total_answered if total_answered > 0 else 0
+                option_distribution.append({
+                    'option_id': f'other_{len(option_distribution)}',
+                    'option_label': f'Other: {answer_text}',
+                    'count': count,
+                    'percentage': round(percentage, 3),
+                    'rank': 0
+                })
+        
+        # Sort by count and assign ranks
+        option_distribution.sort(key=lambda x: x['count'], reverse=True)
+        for i, option in enumerate(option_distribution):
+            option['rank'] = i + 1
+        
+        return option_distribution
+    
+    def _get_rating_distribution(self, question_answers):
+        """Get distribution for rating questions"""
+        answer_texts = [answer.answer_text for answer in question_answers]
+        rating_counts = defaultdict(int)
+        
+        for answer_text in answer_texts:
+            try:
+                rating = int(float(answer_text))
+                rating_counts[rating] += 1
+            except (ValueError, TypeError):
+                pass
+        
+        distribution = []
+        total_ratings = sum(rating_counts.values())
+        
+        for rating in sorted(rating_counts.keys()):
+            count = rating_counts[rating]
+            percentage = count / total_ratings if total_ratings > 0 else 0
+            
+            distribution.append({
+                'rating': rating,
+                'count': count,
+                'percentage': round(percentage, 3)
+            })
+        
+        return distribution
+    
+    def _get_yes_no_distribution(self, question_answers):
+        """Get distribution for yes/no questions"""
+        answer_texts = [answer.answer_text for answer in question_answers]
+        total_answers = len(answer_texts)
+        
+        yes_count = sum(1 for text in answer_texts if text.lower() in ['yes', 'true', '1', 'نعم'])
+        no_count = sum(1 for text in answer_texts if text.lower() in ['no', 'false', '0', 'لا'])
+        
+        return [
+            {
+                'value': 'yes',
+                'label': 'نعم',
+                'count': yes_count,
+                'percentage': round(yes_count / total_answers, 3) if total_answers > 0 else 0
+            },
+            {
+                'value': 'no',
+                'label': 'لا',
+                'count': no_count,
+                'percentage': round(no_count / total_answers, 3) if total_answers > 0 else 0
+            }
+        ]
+    
+    def _get_textual_analysis(self, question_answers, include_demographics):
+        """Get textual analysis for text questions"""
+        answer_texts = [answer.answer_text for answer in question_answers if answer.answer_text and answer.answer_text.strip()]
+        
+        if not answer_texts:
+            return {
+                'total_words': 0,
+                'average_words': 0,
+                'median_words': 0,
+                'max_words': 0,
+                'min_words': 0,
+                'common_keywords': []
+            }
+        
+        # Calculate word statistics
+        word_counts = [len(text.split()) for text in answer_texts]
+        total_words = sum(word_counts)
+        
+        analysis = {
+            'total_words': total_words,
+            'average_words': round(total_words / len(answer_texts), 2),
+            'median_words': int(median(word_counts)),
+            'max_words': max(word_counts),
+            'min_words': min(word_counts),
+            'common_keywords': []
+        }
+        
+        # Add keyword analysis if demographics are included
+        if include_demographics:
+            word_freq = defaultdict(int)
+            for text in answer_texts:
+                words = text.lower().split()
+                for word in words:
+                    clean_word = ''.join(c for c in word if c.isalnum())
+                    if len(clean_word) > 2:  # Only words longer than 2 characters
+                        word_freq[clean_word] += 1
+            
+            # Get top keywords
+            top_keywords = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+            analysis['common_keywords'] = [
+                {
+                    'word': word,
+                    'count': count,
+                    'percentage': round(count / len(answer_texts), 3)
+                }
+                for word, count in top_keywords if count > 1
+            ]
+        
+        return analysis
+    
+    def _get_time_distribution(self, question_answers):
+        """Get time-based distribution"""
+        responses_by_date = defaultdict(lambda: {'responses': 0, 'answered': 0, 'skipped': 0})
+        
+        for answer in question_answers:
+            date_str = format_uae_date_only(answer.response.submitted_at)
+            responses_by_date[date_str]['answered'] += 1
+        
+        # Convert to list format
+        time_distribution = []
+        for date_str in sorted(responses_by_date.keys()):
+            data = responses_by_date[date_str]
+            time_distribution.append({
+                'period': date_str,
+                'period_label': format_uae_date_only(parse_datetime(date_str + 'T00:00:00+04:00')),
+                'responses': data['answered'],  # For now, same as answered
+                'answered': data['answered'],
+                'skipped': data['skipped']
+            })
+        
+        return time_distribution
+    
+    def _get_auth_status_distribution(self, question_answers, all_responses):
+        """Get distribution by authentication status"""
+        authenticated_answers = question_answers.filter(response__respondent__isnull=False).count()
+        anonymous_answers = question_answers.filter(response__respondent__isnull=True).count()
+        
+        total_authenticated = all_responses.filter(respondent__isnull=False).count()
+        total_anonymous = all_responses.filter(respondent__isnull=True).count()
+        
+        total_responses = total_authenticated + total_anonymous
+        
+        return [
+            {
+                'type': 'authenticated',
+                'count': total_authenticated,
+                'percentage': round(total_authenticated / total_responses, 3) if total_responses > 0 else 0,
+                'answered': authenticated_answers,
+                'skipped': total_authenticated - authenticated_answers
+            },
+            {
+                'type': 'anonymous', 
+                'count': total_anonymous,
+                'percentage': round(total_anonymous / total_responses, 3) if total_responses > 0 else 0,
+                'answered': anonymous_answers,
+                'skipped': total_anonymous - anonymous_answers
+            }
+        ]
+    
+    def _calculate_question_statistics(self, question, question_answers):
+        """Calculate question statistics"""
+        statistics = {}
+        
+        if question.question_type in ['single_choice', 'multiple_choice']:
+            # Find the mode (most popular choice)
+            answer_texts = [answer.answer_text for answer in question_answers]
+            if answer_texts:
+                most_common = Counter(answer_texts).most_common(1)[0]
+                statistics['mode'] = {
+                    'option_id': 'opt1',  # Simplified
+                    'option_label': most_common[0],
+                    'count': most_common[1],
+                    'percentage': round(most_common[1] / len(answer_texts), 3)
+                }
+                
+                # Calculate entropy (measure of diversity)
+                counts = list(Counter(answer_texts).values())
+                total = sum(counts)
+                entropy = -sum((c/total) * math.log2(c/total) for c in counts if c > 0)
+                statistics['entropy'] = round(entropy, 2)
+                
+                # Response consistency (simplified)
+                statistics['response_consistency'] = round(most_common[1] / len(answer_texts), 2)
+        
+        elif question.question_type == 'rating':
+            # Calculate rating statistics
+            numeric_values = []
+            for answer in question_answers:
+                try:
+                    value = float(answer.answer_text)
+                    numeric_values.append(value)
+                except (ValueError, TypeError):
+                    pass
+            
+            if numeric_values:
+                import statistics as stats_module
+                statistics['average'] = round(stats_module.mean(numeric_values), 2)
+                statistics['median'] = stats_module.median(numeric_values)
+                statistics['mode'] = stats_module.mode(numeric_values) if len(set(numeric_values)) < len(numeric_values) else numeric_values[0]
+                statistics['standard_deviation'] = round(stats_module.stdev(numeric_values) if len(numeric_values) > 1 else 0, 2)
+                statistics['min'] = min(numeric_values)
+                statistics['max'] = max(numeric_values)
+        
+        return statistics
+    
+    def _get_recent_responses(self, question_answers, include_demographics):
+        """Get recent responses"""
+        recent_answers = question_answers.order_by('-response__submitted_at')[:5]
+        recent_responses = []
+        
+        for answer in recent_answers:
+            response_data = {
+                'id': f'resp_{answer.id}',
+                'response_time': serialize_datetime_uae(answer.response.submitted_at),
+                'is_authenticated': answer.response.respondent is not None,
+                'completion_time_seconds': 30  # Placeholder - would need to calculate from actual data
+            }
+            
+            # Add answer data based on question type
+            if answer.question.question_type in ['single_choice', 'multiple_choice']:
+                response_data['selected_option'] = {
+                    'id': 'opt1',  # Simplified
+                    'label': answer.answer_text
+                }
+            elif answer.question.question_type == 'rating':
+                response_data['rating'] = answer.answer_text
+            elif answer.question.question_type == 'yes_no':
+                response_data['choice'] = answer.answer_text
+            elif answer.question.question_type in ['text', 'textarea']:
+                if include_demographics:
+                    response_data['text_excerpt'] = answer.answer_text[:100] + '...' if len(answer.answer_text) > 100 else answer.answer_text
+                    response_data['word_count'] = len(answer.answer_text.split())
+                else:
+                    response_data['text_excerpt'] = '[Text response - demographics not included]'
+                    response_data['word_count'] = len(answer.answer_text.split())
+            
+            recent_responses.append(response_data)
+        
+        return recent_responses
+    
+    def _generate_question_insights(self, question, question_answers, total_responses):
+        """Generate insights for the question"""
+        insights = []
+        answered_count = question_answers.count()
+        answer_rate = answered_count / total_responses if total_responses > 0 else 0
+        
+        # Answer rate insight
+        if answer_rate >= 0.9:
+            insights.append({
+                'type': 'skip_rate',
+                'title': 'معدل تخطي منخفض',
+                'description': f'{round(answer_rate * 100, 1)}% من المستجيبين أجابوا على هذا السؤال',
+                'severity': 'success'
+            })
+        elif answer_rate < 0.7:
+            insights.append({
+                'type': 'skip_rate',
+                'title': 'معدل تخطي مرتفع',
+                'description': f'{round((1 - answer_rate) * 100, 1)}% من المستجيبين لم يجيبوا على هذا السؤال',
+                'severity': 'warning'
+            })
+        
+        # Question-type specific insights
+        if question.question_type in ['single_choice', 'multiple_choice'] and answered_count > 0:
+            answer_texts = [answer.answer_text for answer in question_answers]
+            most_common = Counter(answer_texts).most_common(1)[0]
+            most_common_pct = most_common[1] / answered_count
+            
+            if most_common_pct > 0.6:
+                insights.append({
+                    'type': 'popular_choice',
+                    'title': 'الخيار الأكثر شعبية',
+                    'description': f'{most_common[0]} هو الخيار الأكثر اختيارًا بنسبة {round(most_common_pct * 100, 1)}%',
+                    'severity': 'info'
+                })
+            
+            # Check for low-response options
+            option_counts = Counter(answer_texts)
+            for option, count in option_counts.items():
+                option_pct = count / answered_count
+                if option_pct < 0.1 and count > 0:
+                    insights.append({
+                        'type': 'low_response_option',
+                        'title': 'خيار قليل الاختيار',
+                        'description': f'{option} تم اختياره بنسبة {round(option_pct * 100, 1)}% فقط',
+                        'severity': 'warning'
+                    })
+        
+        elif question.question_type == 'rating' and answered_count > 0:
+            numeric_values = []
+            for answer in question_answers:
+                try:
+                    value = float(answer.answer_text)
+                    numeric_values.append(value)
+                except (ValueError, TypeError):
+                    pass
+            
+            if numeric_values:
+                avg_rating = mean(numeric_values)
+                if avg_rating >= 4:
+                    insights.append({
+                        'type': 'high_rating',
+                        'title': 'تقييم إيجابي',
+                        'description': f'متوسط التقييم {round(avg_rating, 1)} من 5',
+                        'severity': 'success'
+                    })
+                elif avg_rating <= 2:
+                    insights.append({
+                        'type': 'low_rating',
+                        'title': 'تقييم منخفض',
+                        'description': f'متوسط التقييم {round(avg_rating, 1)} من 5',
+                        'severity': 'warning'
+                    })
+        
+        return insights
 
 
 class MySharedSurveysView(generics.ListAPIView):
@@ -4788,6 +5397,10 @@ class TokenSurveysView(APIView):
             if not access_token.survey.is_active or access_token.survey.deleted_at is not None:
                 return None, "Associated survey is not active"
             
+            # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+            if access_token.survey.status != 'submitted':
+                return None, "This survey is not yet available for public access"
+            
             if not access_token.survey.is_currently_active():
                 return None, get_arabic_status_message(access_token.survey)
             
@@ -4886,6 +5499,10 @@ class TokenSurveyDetailView(APIView):
             
             if not survey.is_active:
                 return None, None, "Survey is not active"
+            
+            # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+            if survey.status != 'submitted':
+                return None, None, "This survey is not yet available for public access"
             
             if not is_currently_active_uae(survey):
                 return None, None, get_arabic_status_message(survey)
@@ -5034,6 +5651,19 @@ class PasswordAccessValidationView(APIView):
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             
+            # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+            if survey.status != 'submitted':
+                return uniform_response(
+                    success=False,
+                    message="This survey is not yet available for public access. Please contact the survey creator.",
+                    data={
+                        'has_access': False,
+                        'survey_status': 'draft',
+                        'reason': 'survey_not_submitted'
+                    },
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
             if not is_currently_active_uae(survey):
                 return uniform_response(
                     success=False,
@@ -5126,6 +5756,10 @@ class PasswordProtectedSurveyView(APIView):
             
             if not survey.is_active:
                 return None, None, "Survey is not active"
+            
+            # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
+            if survey.status != 'submitted':
+                return None, None, "This survey is not yet available for public access"
             
             if not survey.is_currently_active():
                 return None, None, get_arabic_status_message(survey)
