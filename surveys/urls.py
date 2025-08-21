@@ -2,7 +2,7 @@
 URL patterns for surveys API endpoints.
 
 This module defines the URL routing following the same patterns
-as news_service and Files_Endpoints.
+as the authentication system.
 """
 
 from django.urls import path, include
@@ -18,6 +18,15 @@ router.register('surveys', views.SurveyViewSet, basename='survey')
 urlpatterns = [
     # ViewSet routes
     path('', include(router.urls)),
+    
+    # Draft and Submit endpoints
+    path('draft/', 
+         views.SurveyDraftView.as_view(), 
+         name='survey-draft'),
+    
+    path('submit/', 
+         views.SurveySubmitView.as_view(), 
+         name='survey-submit'),
     
     # My shared surveys endpoint
     path('my-shared/', 
@@ -52,6 +61,30 @@ urlpatterns = [
     path('admin/surveys/<uuid:survey_id>/responses/', 
          views.AdminSurveyResponsesView.as_view(), 
          name='admin-survey-responses'),
+    
+    # Analytics Dashboard APIs
+    path('admin/surveys/<uuid:survey_id>/dashboard/',
+         views.SurveyAnalyticsDashboardView.as_view(),
+         name='survey-analytics-dashboard'),
+    
+    # Alternative URL pattern for frontend compatibility
+    path('admin/surveys/<uuid:survey_id>/analytics/dashboard/',
+         views.SurveyAnalyticsDashboardView.as_view(),
+         name='survey-analytics-dashboard-alt'),
+    
+    # Questions analytics overview endpoint
+    path('admin/surveys/<uuid:survey_id>/questions/analytics/dashboard/',
+         views.SurveyQuestionsAnalyticsView.as_view(),
+         name='survey-questions-analytics'),
+    
+    path('admin/surveys/<uuid:survey_id>/questions/<uuid:question_id>/dashboard/',
+         views.QuestionAnalyticsDashboardView.as_view(),
+         name='question-analytics-dashboard'),
+    
+    # Alternative URL pattern for question analytics frontend compatibility
+    path('admin/surveys/<uuid:survey_id>/questions/<uuid:question_id>/analytics/dashboard/',
+         views.QuestionAnalyticsDashboardView.as_view(),
+         name='question-analytics-dashboard-alt'),
     
     # Token-Based Access APIs
     path('token/surveys/', 

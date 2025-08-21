@@ -59,8 +59,6 @@ INSTALLED_APPS = [
     "django_filters",
     # Local apps
     'authentication',
-    'news_service',
-    'Files_Endpoints',
     'surveys',
 ]
 
@@ -78,19 +76,6 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     # Emirates timezone middleware - forces Asia/Dubai timezone for all requests
     'weaponpowercloud_backend.middleware.emirates_timezone.EmiratesTimezoneMiddleware',
-    'news_service.middleware.NewsEncryptionMiddleware',
-    'news_service.middleware.NewsLoggingMiddleware',
-    'news_service.middleware.NewsSecurityMiddleware',
-    'news_service.middleware.UniformResponseMiddleware',
-    'Files_Endpoints.middleware.FilesEncryptionMiddleware',
-    'Files_Endpoints.middleware.FilesLoggingMiddleware',
-    'Files_Endpoints.middleware.QuotaEnforcementMiddleware',
-    'Files_Endpoints.middleware.ShareAccessMiddleware',
-    'Files_Endpoints.middleware.FilesSecurityMiddleware',
-    'Files_Endpoints.middleware.FilesUniformResponseMiddleware',
-    'Files_Endpoints.middleware.QuotaEnforcementMiddleware',
-    'Files_Endpoints.middleware.ShareAccessMiddleware',
-    'Files_Endpoints.middleware.FilesSecurityMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
@@ -117,33 +102,48 @@ WSGI_APPLICATION = 'weaponpowercloud_backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-# Use Oracle database by default
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.oracle',
-        'NAME': os.getenv('ORACLE_SERVICE'),
-        'USER': os.getenv('ORACLE_USERNAME'),
-        'PASSWORD': os.getenv('ORACLE_PASSWORD'),
-        'HOST': os.getenv('ORACLE_HOST'),
-        'PORT': os.getenv('ORACLE_PORT'),
-        'OPTIONS': {
-            # Oracle-specific connection options
-            # Character set mismatch should be handled at Oracle database level
-            # Keep it simple to avoid connection parameter errors
-        },
+# Database configuration based on USE_ORACLE environment variable
+USE_ORACLE = os.getenv('USE_ORACLE', 'False').lower() == 'true'
+
+if USE_ORACLE:
+    # Oracle database configuration for production
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.oracle',
+            'NAME': os.getenv('ORACLE_SERVICE'),
+            'USER': os.getenv('ORACLE_USERNAME'),
+            'PASSWORD': os.getenv('ORACLE_PASSWORD'),
+            'HOST': os.getenv('ORACLE_HOST'),
+            'PORT': os.getenv('ORACLE_PORT'),
+            'OPTIONS': {
+                # Oracle-specific connection options
+                # Character set mismatch should be handled at Oracle database level
+                # Keep it simple to avoid connection parameter errors
+            },
+        }
     }
-}
-
-# Oracle-specific settings
-SILENCED_SYSTEM_CHECKS = [
-    'fields.E007',  # Ignore Oracle field name length warnings
-    'models.W037',  # Ignore Oracle conditional index warnings
-]
-
-# Set Oracle NLS_LANG environment variable for character set handling
-import os
-# This helps resolve Oracle character set mismatch issues
-os.environ.setdefault('NLS_LANG', 'AMERICAN_AMERICA.AL32UTF8')
+    
+    # Oracle-specific settings
+    SILENCED_SYSTEM_CHECKS = [
+        'fields.E007',  # Ignore Oracle field name length warnings
+        'models.W037',  # Ignore Oracle conditional index warnings
+    ]
+    
+    # Set Oracle NLS_LANG environment variable for character set handling
+    # This helps resolve Oracle character set mismatch issues
+    os.environ.setdefault('NLS_LANG', 'AMERICAN_AMERICA.AL32UTF8')
+    
+else:
+    # SQLite database configuration for local development
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+    
+    # Clear Oracle-specific settings when using SQLite
+    SILENCED_SYSTEM_CHECKS = []
 
 
 # Password validation
@@ -219,11 +219,10 @@ from datetime import timedelta
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),  # Access token expires after 8 hours
-    'REFRESH_TOKEN_LIFETIME': timedelta(minutes=30),  # Refresh token expires after 30 minutes
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=24),  # Refresh token expires after 24 hours
     'ROTATE_REFRESH_TOKENS': True,  # Generate new refresh token on refresh
-    'BLACKLIST_AFTER_ROTATION': True,  # Blacklist old refresh tokens
+    'BLACKLIST_AFTER_ROTATION': False,  # Disabled for Oracle compatibility (no token_blacklist app)
     'UPDATE_LAST_LOGIN': True,  # Update user's last_login field on token refresh
-    
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
     'VERIFYING_KEY': None,
@@ -249,47 +248,6 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_LIFETIME': timedelta(minutes=5),
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
-
-# JWT Configuration for Regular Authentication
-# Import datetime for JWT settings with error handling
-try:
-    from datetime import timedelta
-    
-    SIMPLE_JWT = {
-        'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),  # Access tokens expire after 8 hours
-        'REFRESH_TOKEN_LIFETIME': timedelta(minutes=30),  # Refresh tokens expire after 30 minutes
-        'ROTATE_REFRESH_TOKENS': True,  # Generate new refresh token when refreshing
-        'BLACKLIST_AFTER_ROTATION': True,  # Blacklist old refresh tokens
-        'UPDATE_LAST_LOGIN': True,  # Update last_login field when tokens are generated
-        
-        'ALGORITHM': 'HS256',
-        'SIGNING_KEY': SECRET_KEY,
-        'VERIFYING_KEY': None,
-        'AUDIENCE': None,
-        'ISSUER': None,
-        'JWK_URL': None,
-        'LEEWAY': 0,
-        
-        'AUTH_HEADER_TYPES': ('Bearer',),
-        'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
-        'USER_ID_FIELD': 'id',
-        'USER_ID_CLAIM': 'user_id',
-        'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
-        
-        'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
-        'TOKEN_TYPE_CLAIM': 'token_type',
-        'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
-        
-        'JTI_CLAIM': 'jti',
-        
-        'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
-        'SLIDING_TOKEN_LIFETIME': timedelta(minutes=5),
-        'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
-    }
-    
-except ImportError:
-    # JWT package not installed - settings will be ignored
-    pass
 
 # News Service Configuration
 NEWS_PAGINATION_SIZE = 12  # Cards news pagination

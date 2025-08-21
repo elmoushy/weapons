@@ -1293,3 +1293,103 @@ class AddUserView(APIView):
             return Response({
                 'detail': 'User creation failed due to server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =============================================
+# Custom JWT Views (Oracle Compatible)
+# =============================================
+
+class CustomTokenRefreshView(APIView):
+    """
+    Custom JWT Token Refresh View that doesn't use token blacklisting.
+    
+    This view is designed for Oracle database compatibility where the
+    token_blacklist app is not available. It refreshes JWT tokens without
+    trying to track outstanding tokens.
+    """
+    
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        """
+        Refresh JWT access token using refresh token.
+        
+        Args:
+            request: HTTP request containing refresh token
+            
+        Returns:
+            New access and refresh tokens
+            
+        Request body:
+            {
+                "refresh": "your_refresh_token_here"
+            }
+        """
+        try:
+            from rest_framework_simplejwt.tokens import RefreshToken
+            from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
+            from rest_framework_simplejwt.settings import api_settings
+            
+            # Get refresh token from request
+            refresh_token = request.data.get('refresh')
+            
+            if not refresh_token:
+                return Response({
+                    'detail': 'Refresh token is required',
+                    'code': 'refresh_required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                # Validate and refresh the token
+                refresh = RefreshToken(refresh_token)
+                
+                # Get user from token payload
+                user_id = refresh.payload.get('user_id')
+                try:
+                    user = User.objects.get(id=user_id)
+                except User.DoesNotExist:
+                    return Response({
+                        'detail': 'User not found',
+                        'code': 'user_not_found'
+                    }, status=status.HTTP_401_UNAUTHORIZED)
+                
+                # Generate new access token
+                access_token = refresh.access_token
+                
+                response_data = {
+                    'access': str(access_token),
+                }
+                
+                # If rotation is enabled, generate new refresh token
+                if api_settings.ROTATE_REFRESH_TOKENS:
+                    # Create new refresh token
+                    new_refresh = RefreshToken.for_user(user)
+                    response_data['refresh'] = str(new_refresh)
+                    
+                    logger.info(f"JWT tokens refreshed with rotation for user: {user.email}")
+                else:
+                    # Return the same refresh token
+                    response_data['refresh'] = str(refresh)
+                    
+                    logger.info(f"JWT access token refreshed for user: {user.email}")
+                
+                return Response(response_data, status=status.HTTP_200_OK)
+                
+            except TokenError as e:
+                logger.warning(f"Token refresh failed - invalid token: {str(e)}")
+                return Response({
+                    'detail': 'Invalid or expired refresh token',
+                    'code': 'token_invalid'
+                }, status=status.HTTP_401_UNAUTHORIZED)
+                
+        except ImportError:
+            logger.error("JWT package not available")
+            return Response({
+                'detail': 'JWT functionality not available'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        except Exception as e:
+            logger.error(f"Unexpected error during token refresh: {str(e)}")
+            return Response({
+                'detail': 'Token refresh failed due to server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

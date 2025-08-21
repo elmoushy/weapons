@@ -11,10 +11,15 @@ from . import views
 
 # Import JWT views with error handling
 try:
+    # We're not using the default TokenRefreshView anymore, but keep the import 
+    # for compatibility checks
     from rest_framework_simplejwt.views import TokenRefreshView
     JWT_AVAILABLE = True
 except ImportError:
     JWT_AVAILABLE = False
+
+# Import our custom token refresh view
+from .views import CustomTokenRefreshView
 
 
 app_name = 'authentication'
@@ -59,5 +64,5 @@ urlpatterns = [
 # Add JWT token refresh endpoint if available
 if JWT_AVAILABLE:
     urlpatterns += [
-        path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+        path('token/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     ]

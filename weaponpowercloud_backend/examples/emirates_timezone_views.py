@@ -112,29 +112,22 @@ class TimezoneAwareModelMixin:
 
 
 # Example usage in your existing views
-def example_news_view_with_timezone(request):
+def example_timezone_view(request):
     """
-    Example showing how to modify your existing news views
-    to properly handle Emirates timezone.
+    Example showing how to work with Emirates timezone
+    in your views and models.
     """
-    from news_service.models import NewsItem
+    from django.utils import timezone
     from django.core.paginator import Paginator
     
     # All datetime operations will use Emirates timezone due to middleware
-    news_items = NewsItem.objects.all().order_by('-created_at')
+    current_time = timezone.now()
     
     # Format timestamps for response
-    news_data = []
-    for item in news_items[:10]:  # Limit for example
-        news_data.append({
-            'id': item.id,
-            'title': item.title,
-            'created_at': format_emirates_datetime(item.created_at),
-            'created_at_iso': convert_to_emirates(item.created_at).isoformat(),
-        })
+    data = {
+        'current_time': current_time.isoformat(),
+        'timezone': str(current_time.tzinfo),
+        'message': 'This is an example view showing timezone handling'
+    }
     
-    return JsonResponse({
-        'news': news_data,
-        'server_time': format_emirates_datetime(now_emirates()),
-        'timezone': 'Asia/Dubai'
-    })
+    return JsonResponse(data)

@@ -2,7 +2,7 @@
 Custom permissions for surveys with role-based access control.
 
 This module implements the permission classes following the same patterns
-as news_service and Files_Endpoints with support for three visibility levels.
+as the authentication system with support for three visibility levels.
 """
 
 from rest_framework.permissions import BasePermission, SAFE_METHODS

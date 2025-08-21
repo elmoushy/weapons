@@ -51,53 +51,69 @@ def create_surveys_tables(apps, schema_editor):
     if connection.vendor == 'oracle':
         return
     
+    # For SQLite, check if tables already exist to avoid errors
     with connection.cursor() as cursor:
-        # Create SURVEYS_SURVEY table
+        # Check if SURVEYS_SURVEY table already exists
         cursor.execute("""
-            CREATE TABLE SURVEYS_SURVEY (
-                ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                TITLE CLOB,
-                TITLE_HASH VARCHAR2(64),
-                DESCRIPTION CLOB,
-                VISIBILITY VARCHAR2(8) DEFAULT 'AUTH' NOT NULL,
-                IS_LOCKED NUMBER(1) DEFAULT 0 NOT NULL,
-                IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
-                CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                DELETED_AT TIMESTAMP,
-                CREATOR_ID NUMBER(38) NOT NULL,
-                START_DATE TIMESTAMP,
-                END_DATE TIMESTAMP,
-                CONSTRAINT FK_SURVEYS_SURVEY_CREATOR 
-                    FOREIGN KEY (CREATOR_ID) REFERENCES AUTHENTICATION_USER(ID)
-            )
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='SURVEYS_SURVEY'
         """)
+        if cursor.fetchone():
+            print("✅ SURVEYS tables already exist, skipping creation...")
+            return
+        # Create SURVEYS_SURVEY table
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_SURVEY (
+                    ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+                    TITLE CLOB,
+                    TITLE_HASH VARCHAR2(64),
+                    DESCRIPTION CLOB,
+                    VISIBILITY VARCHAR2(8) DEFAULT 'AUTH' NOT NULL,
+                    IS_LOCKED NUMBER(1) DEFAULT 0 NOT NULL,
+                    IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
+                    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    DELETED_AT TIMESTAMP,
+                    CREATOR_ID NUMBER(38) NOT NULL,
+                    START_DATE TIMESTAMP,
+                    END_DATE TIMESTAMP,
+                    CONSTRAINT FK_SURVEYS_SURVEY_CREATOR 
+                        FOREIGN KEY (CREATOR_ID) REFERENCES AUTHENTICATION_USER(ID)
+                )
+            """)
+        except Exception as e:
+            print(f"SURVEYS_SURVEY table creation skipped: {e}")
         
         # Create SURVEYS_QUESTION table
-        cursor.execute("""
-            CREATE TABLE SURVEYS_QUESTION (
-                ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                TEXT CLOB NOT NULL,
-                TEXT_HASH VARCHAR2(64),
-                QUESTION_TYPE VARCHAR2(20) DEFAULT 'text' NOT NULL,
-                OPTIONS CLOB,
-                IS_REQUIRED NUMBER(1) DEFAULT 0 NOT NULL,
-                ORDER_NUM NUMBER(10) DEFAULT 0 NOT NULL,
-                CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                SURVEY_ID RAW(16) NOT NULL,
-                CONSTRAINT FK_SURVEYS_QUESTION_SURVEY 
-                    FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE
-            )
-        """)
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_QUESTION (
+                    ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+                    TEXT CLOB NOT NULL,
+                    TEXT_HASH VARCHAR2(64),
+                    QUESTION_TYPE VARCHAR2(20) DEFAULT 'text' NOT NULL,
+                    OPTIONS CLOB,
+                    IS_REQUIRED NUMBER(1) DEFAULT 0 NOT NULL,
+                    ORDER_NUM NUMBER(10) DEFAULT 0 NOT NULL,
+                    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    SURVEY_ID RAW(16) NOT NULL,
+                    CONSTRAINT FK_SURVEYS_QUESTION_SURVEY 
+                        FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE
+                )
+            """)
+        except Exception as e:
+            print(f"SURVEYS_QUESTION table creation skipped: {e}")
         
         # Create SURVEYS_RESPONSE table
-        cursor.execute("""
-            CREATE TABLE SURVEYS_RESPONSE (
-                ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                SUBMITTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                IS_COMPLETE NUMBER(1) DEFAULT 1 NOT NULL,
-                IP_ADDRESS VARCHAR2(39),
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_RESPONSE (
+                    ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+                    SUBMITTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    IS_COMPLETE NUMBER(1) DEFAULT 1 NOT NULL,
+                    IP_ADDRESS VARCHAR2(39),
                 RESPONDENT_EMAIL VARCHAR2(254),
                 RESPONDENT_ID NUMBER(38),
                 SURVEY_ID RAW(16) NOT NULL,
@@ -107,166 +123,194 @@ def create_surveys_tables(apps, schema_editor):
                     FOREIGN KEY (RESPONDENT_ID) REFERENCES AUTHENTICATION_USER(ID) ON DELETE SET NULL
             )
         """)
+        except Exception as e:
+            print(f"SURVEYS_RESPONSE table creation skipped: {e}")
         
         # Create SURVEYS_ANSWER table
-        cursor.execute("""
-            CREATE TABLE SURVEYS_ANSWER (
-                ID NUMBER(38) PRIMARY KEY,
-                ANSWER_TEXT CLOB NOT NULL,
-                CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                RESPONSE_ID RAW(16) NOT NULL,
-                QUESTION_ID RAW(16) NOT NULL,
-                CONSTRAINT FK_SURVEYS_ANSWER_RESPONSE 
-                    FOREIGN KEY (RESPONSE_ID) REFERENCES SURVEYS_RESPONSE(ID) ON DELETE CASCADE,
-                CONSTRAINT FK_SURVEYS_ANSWER_QUESTION 
-                    FOREIGN KEY (QUESTION_ID) REFERENCES SURVEYS_QUESTION(ID) ON DELETE CASCADE,
-                CONSTRAINT UK_SURVEYS_ANSWER_RESP_QUEST 
-                    UNIQUE (RESPONSE_ID, QUESTION_ID)
-            )
-        """)
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_ANSWER (
+                    ID NUMBER(38) PRIMARY KEY,
+                    ANSWER_TEXT CLOB NOT NULL,
+                    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    RESPONSE_ID RAW(16) NOT NULL,
+                    QUESTION_ID RAW(16) NOT NULL,
+                    CONSTRAINT FK_SURVEYS_ANSWER_RESPONSE 
+                        FOREIGN KEY (RESPONSE_ID) REFERENCES SURVEYS_RESPONSE(ID) ON DELETE CASCADE,
+                    CONSTRAINT FK_SURVEYS_ANSWER_QUESTION 
+                        FOREIGN KEY (QUESTION_ID) REFERENCES SURVEYS_QUESTION(ID) ON DELETE CASCADE,
+                    CONSTRAINT UK_SURVEYS_ANSWER_RESP_QUEST 
+                        UNIQUE (RESPONSE_ID, QUESTION_ID)
+                )
+            """)
+        except Exception as e:
+            print(f"SURVEYS_ANSWER table creation skipped: {e}")
         
         # Create SURVEYS_PUBLIC_ACCESS_TOKEN table
-        cursor.execute("""
-            CREATE TABLE SURVEYS_PUBLIC_ACCESS_TOKEN (
-                ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                TOKEN VARCHAR2(64) UNIQUE NOT NULL,
-                CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                EXPIRES_AT TIMESTAMP NOT NULL,
-                IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
-                CREATED_BY_ID NUMBER(38) NOT NULL,
-                SURVEY_ID RAW(16) NOT NULL,
-                CONSTRAINT FK_SURVEYS_TOKEN_CREATED_BY 
-                    FOREIGN KEY (CREATED_BY_ID) REFERENCES AUTHENTICATION_USER(ID) ON DELETE CASCADE,
-                CONSTRAINT FK_SURVEYS_TOKEN_SURVEY 
-                    FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE
-            )
-        """)
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_PUBLIC_ACCESS_TOKEN (
+                    ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+                    TOKEN VARCHAR2(64) UNIQUE NOT NULL,
+                    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    EXPIRES_AT TIMESTAMP NOT NULL,
+                    IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
+                    CREATED_BY_ID NUMBER(38) NOT NULL,
+                    SURVEY_ID RAW(16) NOT NULL,
+                    CONSTRAINT FK_SURVEYS_TOKEN_CREATED_BY 
+                        FOREIGN KEY (CREATED_BY_ID) REFERENCES AUTHENTICATION_USER(ID) ON DELETE CASCADE,
+                    CONSTRAINT FK_SURVEYS_TOKEN_SURVEY 
+                        FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE
+                )
+            """)
+        except Exception as e:
+            print(f"SURVEYS_PUBLIC_ACCESS_TOKEN table creation skipped: {e}")
         
         # Create sequence for SURVEYS_ANSWER ID
-        cursor.execute("""
-            CREATE SEQUENCE SURVEYS_ANSWER_ID_SEQ
-            START WITH 1
-            INCREMENT BY 1
-            NOCACHE
-        """)
+        try:
+            cursor.execute("""
+                CREATE SEQUENCE SURVEYS_ANSWER_ID_SEQ
+                START WITH 1
+                INCREMENT BY 1
+                NOCACHE
+            """)
+        except Exception as e:
+            print(f"SURVEYS_ANSWER_ID_SEQ sequence creation skipped: {e}")
         
         # Create trigger for SURVEYS_ANSWER ID auto-increment
-        cursor.execute("""
-            CREATE OR REPLACE TRIGGER SURVEYS_ANSWER_ID_TRG
-            BEFORE INSERT ON SURVEYS_ANSWER
-            FOR EACH ROW
-            BEGIN
-                IF :NEW.ID IS NULL THEN
-                    SELECT SURVEYS_ANSWER_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
-                END IF;
-            END;
-        """)
+        try:
+            cursor.execute("""
+                CREATE OR REPLACE TRIGGER SURVEYS_ANSWER_ID_TRG
+                BEFORE INSERT ON SURVEYS_ANSWER
+                FOR EACH ROW
+                BEGIN
+                    IF :NEW.ID IS NULL THEN
+                        SELECT SURVEYS_ANSWER_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
+                    END IF;
+                END;
+            """)
+        except Exception as e:
+            print(f"SURVEYS_ANSWER_ID_TRG trigger creation skipped: {e}")
         
         # Create SURVEYS_SURVEY_SHARED_WITH table (many-to-many)
-        cursor.execute("""
-            CREATE TABLE SURVEYS_SURVEY_SHARED_WITH (
-                ID NUMBER(38) PRIMARY KEY,
-                SURVEY_ID RAW(16) NOT NULL,
-                USER_ID NUMBER(38) NOT NULL,
-                CONSTRAINT FK_SURVEYS_SHARED_SURVEY 
-                    FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE,
-                CONSTRAINT FK_SURVEYS_SHARED_USER 
-                    FOREIGN KEY (USER_ID) REFERENCES AUTHENTICATION_USER(ID) ON DELETE CASCADE,
-                CONSTRAINT UK_SURVEYS_SHARED_SURVEY_USER 
-                    UNIQUE (SURVEY_ID, USER_ID)
-            )
-        """)
+        try:
+            cursor.execute("""
+                CREATE TABLE SURVEYS_SURVEY_SHARED_WITH (
+                    ID NUMBER(38) PRIMARY KEY,
+                    SURVEY_ID RAW(16) NOT NULL,
+                    USER_ID NUMBER(38) NOT NULL,
+                    CONSTRAINT FK_SURVEYS_SHARED_SURVEY 
+                        FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE,
+                    CONSTRAINT FK_SURVEYS_SHARED_USER 
+                        FOREIGN KEY (USER_ID) REFERENCES AUTHENTICATION_USER(ID) ON DELETE CASCADE,
+                    CONSTRAINT UK_SURVEYS_SHARED_SURVEY_USER 
+                        UNIQUE (SURVEY_ID, USER_ID)
+                )
+            """)
+        except Exception as e:
+            print(f"SURVEYS_SURVEY_SHARED_WITH table creation skipped: {e}")
         
         # Create sequence for SURVEYS_SURVEY_SHARED_WITH ID
-        cursor.execute("""
-            CREATE SEQUENCE SURVEYS_SURVEY_SHARED_WITH_ID_SEQ
-            START WITH 1
-            INCREMENT BY 1
-            NOCACHE
-        """)
+        try:
+            cursor.execute("""
+                CREATE SEQUENCE SURVEYS_SURVEY_SHARED_WITH_ID_SEQ
+                START WITH 1
+                INCREMENT BY 1
+                NOCACHE
+            """)
+        except Exception as e:
+            print(f"SURVEYS_SURVEY_SHARED_WITH_ID_SEQ sequence creation skipped: {e}")
         
         # Create trigger for SURVEYS_SURVEY_SHARED_WITH ID
-        cursor.execute("""
-            CREATE OR REPLACE TRIGGER SURVEYS_SURVEY_SHARED_WITH_TRG
-            BEFORE INSERT ON SURVEYS_SURVEY_SHARED_WITH
-            FOR EACH ROW
-            BEGIN
-                IF :NEW.ID IS NULL THEN
-                    SELECT SURVEYS_SURVEY_SHARED_WITH_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
-                END IF;
-            END;
-        """)
+        try:
+            cursor.execute("""
+                CREATE OR REPLACE TRIGGER SURVEYS_SURVEY_SHARED_WITH_TRG
+                BEFORE INSERT ON SURVEYS_SURVEY_SHARED_WITH
+                FOR EACH ROW
+                BEGIN
+                    IF :NEW.ID IS NULL THEN
+                        SELECT SURVEYS_SURVEY_SHARED_WITH_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
+                    END IF;
+                END;
+            """)
+        except Exception as e:
+            print(f"SURVEYS_SURVEY_SHARED_WITH_TRG trigger creation skipped: {e}")
         
         # Create SURVEYS_SURVEY_SHARED_WITH_GROUPS table (many-to-many)
-        print("🔧 Creating SURVEYS_SURVEY_SHARED_WITH_GROUPS table...")
-        
-        # Get exact column types from existing tables
         try:
-            survey_id_type = _oracle_type_for(cursor, "SURVEYS_SURVEY", "ID")
-            group_id_type = _oracle_type_for(cursor, "AUTHENTICATION_GROUP", "ID")
-        except RuntimeError as e:
-            print(f"❌ Error getting column types: {e}")
-            # Fallback to hardcoded types if tables don't exist yet
-            survey_id_type = "RAW(16)"
-            group_id_type = "NUMBER(38)"
-        
-        # Use numeric type for the primary key
-        id_type = group_id_type if group_id_type.startswith("NUMBER") else "NUMBER(19)"
-        
-        print(f"   Survey ID type: {survey_id_type}")
-        print(f"   Group ID type: {group_id_type}")
-        print(f"   Table ID type: {id_type}")
-        
-        # Clean up if partially exists
-        cleanup_statements = [
-            "DROP TRIGGER SURVEYS_SURVEY_SHARED_GRP_TRG",
-            "DROP TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS CASCADE CONSTRAINTS",
-            "DROP SEQUENCE SURVEYS_SURVEY_SHARED_GRP_ID_SEQ",
-        ]
-        
-        for sql in cleanup_statements:
+            print("🔧 Creating SURVEYS_SURVEY_SHARED_WITH_GROUPS table...")
+            
+            # Get exact column types from existing tables
             try:
-                cursor.execute(sql)
-                print(f"   Cleaned up: {sql}")
-            except Exception:
-                pass  # ignore if it doesn't exist
+                survey_id_type = _oracle_type_for(cursor, "SURVEYS_SURVEY", "ID")
+                group_id_type = _oracle_type_for(cursor, "AUTHENTICATION_GROUP", "ID")
+            except RuntimeError as e:
+                print(f"❌ Error getting column types: {e}")
+                # Fallback to hardcoded types if tables don't exist yet
+                survey_id_type = "RAW(16)"
+                group_id_type = "NUMBER(38)"
+            
+            # Use numeric type for the primary key
+            id_type = group_id_type if group_id_type.startswith("NUMBER") else "NUMBER(19)"
+            
+            print(f"   Survey ID type: {survey_id_type}")
+            print(f"   Group ID type: {group_id_type}")
+            print(f"   Table ID type: {id_type}")
+            
+            # Clean up if partially exists
+            cleanup_statements = [
+                "DROP TRIGGER SURVEYS_SURVEY_SHARED_GRP_TRG",
+                "DROP TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS CASCADE CONSTRAINTS",
+                "DROP SEQUENCE SURVEYS_SURVEY_SHARED_GRP_ID_SEQ",
+            ]
+            
+            for sql in cleanup_statements:
+                try:
+                    cursor.execute(sql)
+                    print(f"   Cleaned up: {sql}")
+                except Exception:
+                    pass  # ignore if it doesn't exist
+            
+            cursor.execute(f"""
+                CREATE TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS (
+                    ID {id_type} PRIMARY KEY,
+                    SURVEY_ID {survey_id_type} NOT NULL,
+                    GROUP_ID {group_id_type} NOT NULL,
+                    CONSTRAINT FK_SURVEYS_SSG_SURVEY 
+                        FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE,
+                    CONSTRAINT FK_SURVEYS_SSG_GROUP 
+                        FOREIGN KEY (GROUP_ID) REFERENCES AUTHENTICATION_GROUP(ID) ON DELETE CASCADE,
+                    CONSTRAINT UK_SURVEYS_SSG 
+                        UNIQUE (SURVEY_ID, GROUP_ID)
+                )
+            """)
+            print("   ✅ Table created")
+            
+            # Create sequence for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
+            cursor.execute("""
+                CREATE SEQUENCE SURVEYS_SSG_ID_SEQ
+                START WITH 1
+                INCREMENT BY 1
+                NOCACHE
+            """)
+            print("   ✅ Sequence created")
+            
+            # Create trigger for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
+            cursor.execute("""
+                CREATE OR REPLACE TRIGGER SURVEYS_SSG_ID_TRG
+                BEFORE INSERT ON SURVEYS_SURVEY_SHARED_WITH_GROUPS
+                FOR EACH ROW
+                BEGIN
+                    IF :NEW.ID IS NULL THEN
+                        SELECT SURVEYS_SSG_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
+                    END IF;
+                END;
+            """)
+            print("   ✅ Trigger created")
+            print("✅ SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation complete!")
         
-        cursor.execute(f"""
-            CREATE TABLE SURVEYS_SURVEY_SHARED_WITH_GROUPS (
-                ID {id_type} PRIMARY KEY,
-                SURVEY_ID {survey_id_type} NOT NULL,
-                GROUP_ID {group_id_type} NOT NULL,
-                CONSTRAINT FK_SURVEYS_SSG_SURVEY 
-                    FOREIGN KEY (SURVEY_ID) REFERENCES SURVEYS_SURVEY(ID) ON DELETE CASCADE,
-                CONSTRAINT FK_SURVEYS_SSG_GROUP 
-                    FOREIGN KEY (GROUP_ID) REFERENCES AUTHENTICATION_GROUP(ID) ON DELETE CASCADE,
-                CONSTRAINT UK_SURVEYS_SSG 
-                    UNIQUE (SURVEY_ID, GROUP_ID)
-            )
-        """)
-        print("   ✅ Table created")
-        
-        # Create sequence for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
-        cursor.execute("""
-            CREATE SEQUENCE SURVEYS_SSG_ID_SEQ
-            START WITH 1
-            INCREMENT BY 1
-            NOCACHE
-        """)
-        print("   ✅ Sequence created")
-        
-        # Create trigger for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
-        cursor.execute("""
-            CREATE OR REPLACE TRIGGER SURVEYS_SSG_ID_TRG
-            BEFORE INSERT ON SURVEYS_SURVEY_SHARED_WITH_GROUPS
-            FOR EACH ROW
-            BEGIN
-                IF :NEW.ID IS NULL THEN
-                    SELECT SURVEYS_SSG_ID_SEQ.NEXTVAL INTO :NEW.ID FROM DUAL;
-                END IF;
-            END;
-        """)
-        print("   ✅ Trigger created")
+        except Exception as e:
+            print(f"SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation skipped: {e}")
         
         # Create indexes for performance
         indexes = [
@@ -310,7 +354,6 @@ def create_surveys_tables(apps, schema_editor):
                 pass
         
         print("   ✅ Indexes created")
-        print("✅ SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation complete!")
 
 
 def drop_surveys_tables(apps, schema_editor):

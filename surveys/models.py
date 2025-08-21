@@ -221,6 +221,18 @@ class Survey(models.Model):
         help_text='Contact method required for public survey submissions (email or phone)'
     )
     
+    # Draft/Submit status
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('submitted', 'Submitted'),
+    ]
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default='draft',
+        help_text='Survey status - draft surveys can be edited, submitted surveys are final'
+    )
+    
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -285,6 +297,33 @@ class Survey(models.Model):
             return 'expired'
         
         return 'active'
+    
+    def can_be_edited(self):
+        """
+        Check if survey can be edited based on status and visibility.
+        - Draft surveys: Always editable
+        - Submitted surveys: Editable based on visibility settings
+          * PRIVATE surveys: Can be edited after submission
+          * AUTH surveys: Can be edited after submission
+          * PUBLIC surveys: Cannot be edited after submission (too risky)
+          * GROUPS surveys: Can be edited after submission
+        """
+        if self.deleted_at is not None:
+            return False
+            
+        if self.status == 'draft':
+            return True
+            
+        if self.status == 'submitted':
+            # Allow editing of submitted surveys except PUBLIC ones
+            return self.visibility in ['PRIVATE', 'AUTH', 'GROUPS']
+            
+        return False
+    
+    def submit(self):
+        """Submit the survey - makes it final and non-editable"""
+        self.status = 'submitted'
+        self.save()
     
     def save(self, *args, **kwargs):
         """Override save to generate title hash and handle date logic with UAE timezone"""

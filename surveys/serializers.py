@@ -1,7 +1,7 @@
 """
 Serializers for surveys with role-based field filtering and validation.
 
-This module follows the established patterns from news_service and Files_Endpoints
+This module follows the established patterns from the authentication system
 with comprehensive validation and encryption support.
 """
 
@@ -26,8 +26,50 @@ class UAEDateTimeField(serializers.DateTimeField):
         return serialize_datetime_uae(value)
 
 
+class OptionsField(serializers.CharField):
+    """Custom field to handle options as JSON string in DB but list in API"""
+    
+    def to_representation(self, value):
+        """Convert stored JSON string to list for API response"""
+        if not value:
+            return []
+        
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Failed to parse options: {value}")
+                return []
+        elif isinstance(value, list):
+            return value
+        
+        return []
+    
+    def to_internal_value(self, data):
+        """Convert list from API to JSON string for DB storage"""
+        if data is None:
+            return ""
+        
+        if isinstance(data, list):
+            return json.dumps(data)
+        elif isinstance(data, str):
+            # Validate it's proper JSON
+            try:
+                parsed = json.loads(data)
+                if isinstance(parsed, list):
+                    return data
+                else:
+                    raise serializers.ValidationError("Options must be a list")
+            except json.JSONDecodeError:
+                raise serializers.ValidationError("Options must be valid JSON")
+        
+        raise serializers.ValidationError("Options must be a list")
+
+
 class QuestionSerializer(serializers.ModelSerializer):
     """Serializer for survey questions with encrypted fields"""
+    
+    options = OptionsField(allow_blank=True, required=False)
     
     class Meta:
         model = Question
@@ -36,45 +78,6 @@ class QuestionSerializer(serializers.ModelSerializer):
             'is_required', 'order', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
-    
-    def to_representation(self, instance):
-        """Convert model instance to representation with proper JSON parsing"""
-        data = super().to_representation(instance)
-        
-        # Parse options JSON string back to list for API response
-        if data.get('options'):
-            try:
-                # If options is a JSON string, parse it to a list
-                if isinstance(data['options'], str):
-                    data['options'] = json.loads(data['options'])
-            except (json.JSONDecodeError, TypeError):
-                # If parsing fails, return empty list
-                logger.warning(f"Failed to parse options for question {instance.id}")
-                data['options'] = []
-        else:
-            # Ensure empty options is represented as empty list, not empty string
-            data['options'] = []
-        
-        return data
-    
-    def validate_options(self, value):
-        """Basic validation for options field"""
-        if not value:
-            return value
-        
-        # Basic JSON validation
-        if isinstance(value, str):
-            try:
-                options_list = json.loads(value)
-                if not isinstance(options_list, list):
-                    raise serializers.ValidationError("Options must be a valid JSON array")
-                return json.dumps(options_list)
-            except (json.JSONDecodeError, TypeError):
-                raise serializers.ValidationError("Options must be valid JSON array")
-        elif isinstance(value, list):
-            return json.dumps(value)
-        
-        return value
     
     def validate(self, data):
         """Cross-field validation for questions"""
@@ -89,20 +92,14 @@ class QuestionSerializer(serializers.ModelSerializer):
                 )
             
             try:
-                # Parse options if it's a string
-                if isinstance(options, str):
-                    options_list = json.loads(options)
-                else:
-                    options_list = options
+                # At this point, options should be a JSON string from our custom field
+                options_list = json.loads(options) if isinstance(options, str) else options
                 
                 if not isinstance(options_list, list) or len(options_list) < 2:
                     raise serializers.ValidationError(
                         "Choice questions must have at least 2 options"
                     )
                     
-                # Store the properly formatted options back
-                data['options'] = json.dumps(options_list)
-                
             except (json.JSONDecodeError, TypeError):
                 raise serializers.ValidationError("Options must be valid JSON array")
         
@@ -152,15 +149,16 @@ class ResponseSerializer(serializers.ModelSerializer):
 class SurveySerializer(serializers.ModelSerializer):
     """
     Main survey serializer with role-based field filtering and UAE timezone handling.
-    Follows the same patterns as news_service serializers.
+    Follows the same patterns as authentication serializers.
     """
     
     questions = QuestionSerializer(many=True, required=False)
     creator_email = serializers.SerializerMethodField()
     response_count = serializers.SerializerMethodField()
     shared_with_emails = serializers.SerializerMethodField()
-    status = serializers.SerializerMethodField()
+    status_display = serializers.SerializerMethodField()
     is_currently_active = serializers.SerializerMethodField()
+    can_be_edited = serializers.SerializerMethodField()
     
     # Use custom UAE timezone fields for date/time serialization
     start_date = UAEDateTimeField(required=False, allow_null=True)
@@ -173,11 +171,11 @@ class SurveySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'visibility', 'shared_with',
             'creator', 'creator_email', 'is_locked', 'is_active',
-            'start_date', 'end_date', 'status', 'is_currently_active',
-            'public_contact_method', 'questions', 'response_count', 
+            'start_date', 'end_date', 'status', 'status_display', 'is_currently_active',
+            'can_be_edited', 'public_contact_method', 'questions', 'response_count', 
             'shared_with_emails', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'creator', 'created_at', 'updated_at', 'status', 'is_currently_active']
+        read_only_fields = ['id', 'creator', 'created_at', 'updated_at', 'status_display', 'is_currently_active', 'can_be_edited']
     
     def get_creator_email(self, obj):
         """Get creator email"""
@@ -191,13 +189,17 @@ class SurveySerializer(serializers.ModelSerializer):
         """Get emails of users survey is shared with"""
         return [user.email for user in obj.shared_with.all()]
     
-    def get_status(self, obj):
+    def get_status_display(self, obj):
         """Get current status of the survey using UAE timezone"""
         return get_status_uae(obj)
     
     def get_is_currently_active(self, obj):
         """Check if survey is currently active based on dates using UAE timezone"""
         return is_currently_active_uae(obj)
+    
+    def get_can_be_edited(self, obj):
+        """Check if survey can be edited (only drafts can be edited)"""
+        return obj.can_be_edited()
     
     def validate(self, data):
         """Validate survey data including date logic"""

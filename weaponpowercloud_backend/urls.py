@@ -30,8 +30,6 @@ def api_root(request):
         'authentication': 'Azure AD JWT',
         'endpoints': {
             'authentication': '/api/auth/',
-            'news': '/api/news/',
-            'files': '/api/files/',
             'surveys': '/api/surveys/',
             'admin': '/admin/',
             'api_docs': '/api/' if settings.DEBUG else None,
@@ -49,12 +47,6 @@ urlpatterns = [
     
     # Authentication endpoints
     path('api/auth/', include('authentication.urls')),
-    
-    # News service endpoints
-    path('api/news/', include('news_service.urls')),
-    
-    # Files management endpoints
-    path('api/files/', include('Files_Endpoints.urls')),
     
     # Survey service endpoints
     path('api/surveys/', include('surveys.urls')),

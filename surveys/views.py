@@ -1,13 +1,13 @@
 """
 Views for surveys with uniform responses and role-based access control.
 
-This module follows the established patterns from news_service and Files_Endpoints
+This module follows the established patterns from the authentication system
 with comprehensive error handling and logging.
 """
 
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Count, Avg
 from django.http import HttpResponse
 from rest_framework import status, generics, filters
 from rest_framework.decorators import api_view, permission_classes, action
@@ -19,10 +19,16 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.contrib.auth import get_user_model
 import logging
 import json
-import io
 import csv
+import io
+from datetime import timedelta
+from collections import defaultdict, Counter
+from statistics import median, mean
+from dateutil.parser import parse as parse_datetime
+import pytz
 
 from .models import Survey, Question, Response as SurveyResponse, Answer, PublicAccessToken
+from .pagination import SurveyPagination
 from .serializers import (
     SurveySerializer, QuestionSerializer, ResponseSerializer,
     SurveySubmissionSerializer, ResponseSubmissionSerializer
@@ -35,11 +41,6 @@ from .timezone_utils import (
     format_uae_datetime, format_uae_date_only, get_status_uae, 
     is_currently_active_uae, serialize_datetime_uae
 )
-import logging
-import json
-import csv
-import io
-from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -363,54 +364,127 @@ class SurveyViewSet(ModelViewSet):
     queryset = Survey.objects.filter(deleted_at__isnull=True)
     serializer_class = SurveySerializer
     permission_classes = [IsAuthenticated, IsCreatorOrReadOnly]
+    pagination_class = SurveyPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['visibility', 'is_active', 'creator']
+    filterset_fields = ['visibility', 'is_active', 'creator', 'status']
     search_fields = ['title', 'description']
-    ordering_fields = ['created_at', 'updated_at', 'title']
+    ordering_fields = ['created_at', 'updated_at', 'title', 'response_count']
     ordering = ['-created_at']
     
     def get_queryset(self):
-        """Filter surveys based on user permissions"""
+        """Filter surveys based on user permissions with enhanced filtering"""
         user = self.request.user
         
+        # Base queryset based on user permissions
         if not user.is_authenticated:
-            # Anonymous users only see public surveys
-            return self.queryset.filter(visibility='PUBLIC', is_active=True)
-        
-        if user.role == 'super_admin':
+            # Anonymous users only see submitted public surveys
+            base_queryset = self.queryset.filter(visibility='PUBLIC', is_active=True, status='submitted')
+        elif user.role == 'super_admin':
             # Super admin sees all surveys
-            return self.queryset
-        
-        if user.role in ['admin', 'manager']:
+            base_queryset = self.queryset
+        elif user.role in ['admin', 'manager']:
             # Admin/Manager see only their own surveys
-            return self.queryset.filter(creator=user)
+            base_queryset = self.queryset.filter(creator=user)
+        else:
+            # Regular users see their own surveys (including drafts), shared surveys (submitted only), public/auth surveys (submitted only), and group-shared surveys (submitted only)
+            user_groups = user.user_groups.values_list('group', flat=True)
+            # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+            base_queryset = self.queryset.filter(
+                Q(creator=user) |  # Own surveys (including drafts)
+                (Q(shared_with=user) & Q(status='submitted')) |  # Shared surveys (submitted only)
+                (Q(shared_with_groups__in=user_groups) & Q(status='submitted')) |  # Group shared (submitted only)
+                (Q(visibility='PUBLIC') & Q(status='submitted')) |  # Public surveys (submitted only)
+                (Q(visibility='AUTH') & Q(status='submitted'))  # Auth surveys (submitted only)
+            ).distinct().defer('description')
         
-        # Regular users see their own surveys, shared surveys, public/auth surveys, and group-shared surveys
-        user_groups = user.user_groups.values_list('group', flat=True)
-        # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
-        return self.queryset.filter(
-            Q(creator=user) |
-            Q(shared_with=user) |
-            Q(shared_with_groups__in=user_groups) |
-            Q(visibility='PUBLIC') |
-            Q(visibility='AUTH')
-        ).distinct().defer('description')
+        # Apply additional filters
+        queryset = self._apply_custom_filters(base_queryset)
+        
+        # Apply custom ordering
+        queryset = self._apply_custom_ordering(queryset)
+        
+        return queryset
+    
+    def _apply_custom_filters(self, queryset):
+        """Apply custom filters for survey status"""
+        survey_status_filter = self.request.query_params.get('survey_status')
+        
+        if survey_status_filter:
+            if survey_status_filter == 'active':
+                # النشطة - Active surveys
+                queryset = queryset.filter(is_active=True)
+            elif survey_status_filter == 'inactive':
+                # غير النشطة - Inactive surveys
+                queryset = queryset.filter(is_active=False)
+            elif survey_status_filter == 'private':
+                # الخاصة - Private surveys
+                queryset = queryset.filter(visibility='PRIVATE')
+            elif survey_status_filter == 'auth_required':
+                # تتطلب تسجيل دخول - Require authentication
+                queryset = queryset.filter(visibility='AUTH')
+            elif survey_status_filter == 'public':
+                # العامة - Public surveys
+                queryset = queryset.filter(visibility='PUBLIC')
+            # 'all' or any other value returns all surveys (no additional filter)
+        
+        return queryset
+    
+    def _apply_custom_ordering(self, queryset):
+        """Apply custom ordering based on Arabic filter options"""
+        sort_by = self.request.query_params.get('sort_by')
+        
+        if sort_by:
+            if sort_by == 'newest':
+                # الأحدث - Newest first
+                queryset = queryset.order_by('-created_at')
+            elif sort_by == 'oldest':
+                # الأقدم - Oldest first
+                queryset = queryset.order_by('created_at')
+            elif sort_by == 'title_asc':
+                # العنوان أ-ي - Title A-Z
+                queryset = queryset.order_by('title')
+            elif sort_by == 'title_desc':
+                # العنوان ي-أ - Title Z-A
+                queryset = queryset.order_by('-title')
+            elif sort_by == 'most_responses':
+                # الأكثر رداً - Most responses
+                from django.db.models import Count
+                queryset = queryset.annotate(
+                    response_count=Count('responses')
+                ).order_by('-response_count', '-created_at')
+        else:
+            # Default ordering
+            queryset = queryset.order_by('-created_at')
+        
+        return queryset
     
     def list(self, request, *args, **kwargs):
-        """List surveys with uniform response"""
+        """List surveys with uniform response and enhanced filtering"""
         try:
             queryset = self.filter_queryset(self.get_queryset())
             page = self.paginate_queryset(queryset)
             
+            # Get filter information for response
+            applied_filters = self._get_applied_filters_info()
+            
             if page is not None:
                 serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
+                response_data = self.get_paginated_response(serializer.data)
+                
+                # Add filter information to paginated response
+                if hasattr(response_data, 'data') and isinstance(response_data.data, dict):
+                    response_data.data['applied_filters'] = applied_filters
+                
+                return response_data
             
             serializer = self.get_serializer(queryset, many=True)
             return uniform_response(
                 success=True,
                 message="Surveys retrieved successfully",
-                data=serializer.data
+                data={
+                    'results': serializer.data,
+                    'applied_filters': applied_filters
+                }
             )
         except Exception as e:
             logger.error(f"Error listing surveys: {e}")
@@ -420,21 +494,34 @@ class SurveyViewSet(ModelViewSet):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    def _get_applied_filters_info(self):
+        """Get information about currently applied filters"""
+        filters_info = {
+            'search': self.request.query_params.get('search', ''),
+            'survey_status': self.request.query_params.get('survey_status', 'all'),
+            'sort_by': self.request.query_params.get('sort_by', 'newest'),
+            'visibility': self.request.query_params.get('visibility', ''),
+            'is_active': self.request.query_params.get('is_active', ''),
+            'status': self.request.query_params.get('status', ''),
+        }
+        return filters_info
+    
     def create(self, request, *args, **kwargs):
-        """Create survey with uniform response"""
+        """Create survey as draft with uniform response"""
         try:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            survey = serializer.save()
+            # Always create new surveys as drafts
+            survey = serializer.save(creator=request.user, status='draft')
             
             return uniform_response(
                 success=True,
-                message="Survey created successfully",
+                message="Survey draft created successfully",
                 data=serializer.data,
                 status_code=status.HTTP_201_CREATED
             )
         except Exception as e:
-            logger.error(f"Error creating survey: {e}")
+            logger.error(f"Error creating survey draft: {e}")
             return uniform_response(
                 success=False,
                 message=str(e),
@@ -444,8 +531,32 @@ class SurveyViewSet(ModelViewSet):
     def update(self, request, *args, **kwargs):
         """Update survey with comprehensive access token management on visibility changes"""
         try:
+            # Check for valid survey ID
+            survey_id = kwargs.get('pk')
+            if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+                return uniform_response(
+                    success=False,
+                    message="Survey ID is required and cannot be undefined",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
             survey = self.get_object()
             user = request.user
+            
+            # Check if survey can be edited (drafts + submitted non-PUBLIC surveys)
+            if not survey.can_be_edited():
+                if survey.status == 'submitted' and survey.visibility == 'PUBLIC':
+                    return uniform_response(
+                        success=False,
+                        message="Cannot update submitted PUBLIC surveys as they may have public responses.",
+                        status_code=status.HTTP_403_FORBIDDEN
+                    )
+                else:
+                    return uniform_response(
+                        success=False,
+                        message="This survey cannot be edited.",
+                        status_code=status.HTTP_403_FORBIDDEN
+                    )
             
             # Check if user can update the survey
             if user.role == 'super_admin':
@@ -556,6 +667,15 @@ class SurveyViewSet(ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         """Retrieve survey with visibility check"""
         try:
+            # Check for valid survey ID
+            survey_id = kwargs.get('pk')
+            if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+                return uniform_response(
+                    success=False,
+                    message="Survey ID is required and cannot be undefined",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
             survey = self.get_object()
             
             # Check access permissions
@@ -583,6 +703,15 @@ class SurveyViewSet(ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         """Delete survey with role-based access control"""
         try:
+            # Check for valid survey ID
+            survey_id = kwargs.get('pk')
+            if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+                return uniform_response(
+                    success=False,
+                    message="Survey ID is required and cannot be undefined",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
             survey = self.get_object()
             user = request.user
             
@@ -2025,12 +2154,15 @@ class SurveyViewSet(ModelViewSet):
 
 class MySharedSurveysView(generics.ListAPIView):
     """
-    Get all surveys accessible to the authenticated user based on sharing rules.
+    Get all submitted surveys accessible to the authenticated user based on sharing rules.
     
-    This includes:
-    - ALL surveys with visibility "PUBLIC" (accessible to everyone, including anonymous users)
-    - ALL surveys with visibility "AUTH" (accessible to all authenticated users, including own surveys)
-    - Surveys with visibility "PRIVATE" where the user is explicitly shared (excluding own private surveys)
+    This includes only submitted surveys (excludes drafts):
+    - ALL submitted surveys with visibility "PUBLIC" (accessible to everyone)
+    - ALL submitted surveys with visibility "AUTH" (accessible to all authenticated users)
+    - Submitted surveys with visibility "PRIVATE" where the user is explicitly shared (excluding own private surveys)
+    - Submitted surveys with visibility "GROUPS" where the user belongs to shared groups
+    
+    Draft surveys are excluded as they are only visible to their creators.
     
     GET /api/surveys/my-shared/
     Access: Authenticated users only
@@ -2087,7 +2219,8 @@ class MySharedSurveysView(generics.ListAPIView):
             queryset = Survey.objects.filter(
                 base_query,
                 deleted_at__isnull=True,
-                is_active=True  # Only show active surveys
+                is_active=True,  # Only show active surveys
+                status='submitted'  # Only show submitted surveys, exclude drafts
             ).distinct().select_related('creator').defer('description')
             
             # Try to add prefetch_related safely
@@ -2893,6 +3026,11 @@ class SurveyResponsesView(generics.ListAPIView):
     def get_queryset(self):
         """Get responses for specific survey"""
         survey_id = self.kwargs.get('survey_id')
+        
+        # Validate survey ID
+        if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+            return SurveyResponse.objects.none()
+            
         survey = get_object_or_404(Survey, id=survey_id, deleted_at__isnull=True)
         
         # Check permissions
@@ -3024,6 +3162,823 @@ def bulk_operations(request):
         )
 
 
+# Analytics Dashboard APIs
+class SurveyAnalyticsDashboardView(APIView):
+    """
+    Survey-level analytics dashboard providing comprehensive KPIs and question summaries.
+    
+    GET /api/surveys/admin/surveys/{survey_id}/dashboard/
+    Access: Admin, Super Admin, or Survey Creator only
+    
+    Query Parameters:
+    - start (ISO datetime): Filter responses from this date
+    - end (ISO datetime): Filter responses until this date  
+    - tz (timezone): Timezone for grouping (default: Asia/Dubai)
+    - group_by (day|week|month): Time series grouping (default: day)
+    - include_personal (true|false): Include PII in responses (default: false)
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, survey_id):
+        """Get comprehensive survey analytics dashboard"""
+        try:
+            # Validate survey access
+            survey = self._get_survey_with_permission_check(request, survey_id)
+            if isinstance(survey, Response):  # Error response
+                return survey
+            
+            # Parse query parameters
+            params = self._parse_query_params(request)
+            
+            # Get filtered responses with optimized prefetch
+            responses = self._get_filtered_responses(survey, params)
+            
+            # Build dashboard data
+            dashboard_data = {
+                'survey': self._get_survey_info(survey),
+                'kpis': self._calculate_kpis(survey, responses, params['include_personal']),
+                'time_series': self._generate_time_series(responses, params),
+                'segments': self._calculate_segments(responses),
+                'questions_summary': self._get_questions_summary(survey, responses, params['include_personal']),
+                'export': self._get_export_links(survey, params['include_personal'])
+            }
+            
+            return uniform_response(
+                success=True,
+                message="Survey analytics retrieved successfully",
+                data=dashboard_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating survey analytics dashboard: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to generate analytics dashboard",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _get_survey_with_permission_check(self, request, survey_id):
+        """Get survey and check permissions"""
+        try:
+            survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+        except Survey.DoesNotExist:
+            return uniform_response(
+                success=False,
+                message="Survey not found",
+                status_code=status.HTTP_404_NOT_FOUND
+            )
+        
+        user = request.user
+        if not (user.role in ['admin', 'super_admin'] or user == survey.creator):
+            return uniform_response(
+                success=False,
+                message="Access denied. Only admins, super admins, or survey creators can view analytics.",
+                status_code=status.HTTP_403_FORBIDDEN
+            )
+        
+        return survey
+    
+    def _parse_query_params(self, request):
+        """Parse and validate query parameters"""
+        params = {
+            'start': None,
+            'end': None,
+            'tz': 'Asia/Dubai',
+            'group_by': 'day',
+            'include_personal': False
+        }
+        
+        # Parse start date
+        start_str = request.query_params.get('start')
+        if start_str:
+            try:
+                params['start'] = parse_datetime(start_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse end date
+        end_str = request.query_params.get('end')
+        if end_str:
+            try:
+                params['end'] = parse_datetime(end_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse timezone
+        tz_str = request.query_params.get('tz', 'Asia/Dubai')
+        try:
+            pytz.timezone(tz_str)  # Validate timezone
+            params['tz'] = tz_str
+        except pytz.exceptions.UnknownTimeZoneError:
+            params['tz'] = 'Asia/Dubai'
+        
+        # Parse group_by
+        group_by = request.query_params.get('group_by', 'day').lower()
+        if group_by in ['day', 'week', 'month']:
+            params['group_by'] = group_by
+        
+        # Parse include_personal
+        include_personal = request.query_params.get('include_personal', 'false').lower()
+        params['include_personal'] = include_personal in ['true', '1', 'yes']
+        
+        return params
+    
+    def _get_filtered_responses(self, survey, params):
+        """Get responses with date filtering and optimization"""
+        queryset = survey.responses.all().select_related('respondent').prefetch_related('answers__question')
+        
+        # Apply date filters
+        if params['start']:
+            queryset = queryset.filter(submitted_at__gte=params['start'])
+        if params['end']:
+            queryset = queryset.filter(submitted_at__lte=params['end'])
+        
+        return queryset
+    
+    def _get_survey_info(self, survey):
+        """Get basic survey information"""
+        return {
+            'id': str(survey.id),
+            'title': survey.title,
+            'visibility': survey.visibility,
+            'created_at': serialize_datetime_uae(survey.created_at),
+            'total_questions': survey.questions.count()
+        }
+    
+    def _calculate_kpis(self, survey, responses, include_personal):
+        """Calculate key performance indicators"""
+        total_responses = responses.count()
+        
+        if total_responses == 0:
+            return {
+                'total_responses': 0,
+                'unique_respondents': 0,
+                'completion_rate': 0.0,
+                'authenticated_count': 0,
+                'anonymous_count': 0,
+                'first_response_at': None,
+                'last_response_at': None,
+                'unique_ips': 0
+            }
+        
+        # Calculate unique respondents based on survey's contact method
+        unique_respondents = self._calculate_unique_respondents(survey, responses)
+        
+        # Completion rate
+        complete_count = responses.filter(is_complete=True).count()
+        completion_rate = complete_count / total_responses if total_responses > 0 else 0.0
+        
+        # Authentication counts
+        authenticated_count = responses.filter(respondent__isnull=False).count()
+        anonymous_count = total_responses - authenticated_count
+        
+        # Time range
+        first_response = responses.order_by('submitted_at').first()
+        last_response = responses.order_by('-submitted_at').first()
+        
+        # Unique IPs (only if include_personal is True)
+        unique_ips = 0
+        if include_personal:
+            unique_ips = responses.filter(ip_address__isnull=False).values('ip_address').distinct().count()
+        
+        return {
+            'total_responses': total_responses,
+            'unique_respondents': unique_respondents,
+            'completion_rate': round(completion_rate, 3),
+            'authenticated_count': authenticated_count,
+            'anonymous_count': anonymous_count,
+            'first_response_at': serialize_datetime_uae(first_response.submitted_at) if first_response else None,
+            'last_response_at': serialize_datetime_uae(last_response.submitted_at) if last_response else None,
+            'unique_ips': unique_ips
+        }
+    
+    def _calculate_unique_respondents(self, survey, responses):
+        """Calculate unique respondents based on contact method"""
+        # Count authenticated users
+        auth_count = responses.filter(respondent__isnull=False).values('respondent').distinct().count()
+        
+        # Count anonymous users based on contact method
+        anon_count = 0
+        if survey.public_contact_method == 'email':
+            anon_count = responses.filter(
+                respondent__isnull=True,
+                respondent_email__isnull=False
+            ).values('respondent_email').distinct().count()
+        elif survey.public_contact_method == 'phone':
+            anon_count = responses.filter(
+                respondent__isnull=True,
+                respondent_phone__isnull=False
+            ).values('respondent_phone').distinct().count()
+        
+        return auth_count + anon_count
+    
+    def _generate_time_series(self, responses, params):
+        """Generate time series data for responses"""
+        if not responses.exists():
+            return []
+        
+        # Get timezone for grouping
+        tz = pytz.timezone(params['tz'])
+        
+        # Group responses by time period
+        grouped_data = defaultdict(lambda: {'responses': 0, 'complete': 0, 'incomplete': 0})
+        
+        for response in responses:
+            # Convert to specified timezone
+            local_time = response.submitted_at.astimezone(tz)
+            
+            # Generate period key based on group_by
+            if params['group_by'] == 'day':
+                period_key = local_time.strftime('%Y-%m-%d')
+            elif params['group_by'] == 'week':
+                # Week start (Monday)
+                week_start = local_time - timedelta(days=local_time.weekday())
+                period_key = week_start.strftime('%Y-%m-%d')
+            else:  # month
+                period_key = local_time.strftime('%Y-%m')
+            
+            grouped_data[period_key]['responses'] += 1
+            if response.is_complete:
+                grouped_data[period_key]['complete'] += 1
+            else:
+                grouped_data[period_key]['incomplete'] += 1
+        
+        # Sort and format output
+        time_series = []
+        for period in sorted(grouped_data.keys()):
+            data = grouped_data[period]
+            time_series.append({
+                'period': period,
+                'responses': data['responses'],
+                'complete': data['complete'],
+                'incomplete': data['incomplete']
+            })
+        
+        return time_series
+    
+    def _calculate_segments(self, responses):
+        """Calculate response segments"""
+        total = responses.count()
+        
+        # By authentication type
+        auth_count = responses.filter(respondent__isnull=False).count()
+        anon_count = total - auth_count
+        
+        by_auth = [
+            {'type': 'authenticated', 'count': auth_count},
+            {'type': 'anonymous', 'count': anon_count}
+        ]
+        
+        # By completion status
+        complete_count = responses.filter(is_complete=True).count()
+        incomplete_count = total - complete_count
+        
+        by_completion = [
+            {'status': 'complete', 'count': complete_count},
+            {'status': 'incomplete', 'count': incomplete_count}
+        ]
+        
+        return {
+            'by_auth': by_auth,
+            'by_completion': by_completion
+        }
+    
+    def _get_questions_summary(self, survey, responses, include_personal):
+        """Generate summary analytics for each question"""
+        questions = survey.questions.all().order_by('order')
+        total_responses = responses.count()
+        summaries = []
+        
+        for question in questions:
+            # Get all answers for this question
+            question_answers = Answer.objects.filter(
+                question=question,
+                response__in=responses
+            ).select_related('response')
+            
+            answer_count = question_answers.count()
+            skipped_count = total_responses - answer_count
+            
+            # Generate distributions based on question type
+            distributions = self._calculate_question_distributions(
+                question, question_answers, include_personal
+            )
+            
+            summary = {
+                'question_id': str(question.id),
+                'order': question.order,
+                'type': question.question_type,
+                'is_required': question.is_required,
+                'answer_count': answer_count,
+                'skipped_count': skipped_count,
+                'distributions': distributions
+            }
+            
+            summaries.append(summary)
+        
+        return summaries
+    
+    def _calculate_question_distributions(self, question, answers, include_personal):
+        """Calculate distributions based on question type"""
+        distributions = {}
+        answer_texts = [answer.answer_text for answer in answers]
+        
+        if question.question_type in ['single_choice', 'multiple_choice']:
+            # Parse options from question
+            try:
+                options = json.loads(question.options) if question.options else []
+            except (json.JSONDecodeError, TypeError):
+                options = []
+            
+            # Count responses for each option
+            option_counts = Counter()
+            total_answers = len(answer_texts)
+            
+            for answer_text in answer_texts:
+                if question.question_type == 'multiple_choice':
+                    # Handle multiple selections (assuming comma-separated or JSON array)
+                    try:
+                        selected = json.loads(answer_text) if answer_text.startswith('[') else answer_text.split(',')
+                        for selection in selected:
+                            selection = selection.strip()
+                            option_counts[selection] += 1
+                    except (json.JSONDecodeError, AttributeError):
+                        option_counts[answer_text] += 1
+                else:
+                    option_counts[answer_text] += 1
+            
+            # Format option distribution
+            option_list = []
+            for option in options:
+                count = option_counts.get(option['value'] if isinstance(option, dict) else option, 0)
+                pct = count / total_answers if total_answers > 0 else 0
+                option_list.append({
+                    'label': option['label'] if isinstance(option, dict) else option,
+                    'count': count,
+                    'pct': round(pct, 3)
+                })
+            
+            distributions['options'] = option_list
+            
+        elif question.question_type == 'yes_no':
+            # Count yes/no responses
+            yes_count = sum(1 for text in answer_texts if text.lower() in ['yes', 'true', '1', 'نعم'])
+            no_count = sum(1 for text in answer_texts if text.lower() in ['no', 'false', '0', 'لا'])
+            total_answers = len(answer_texts)
+            
+            distributions['yes_no'] = [
+                {
+                    'value': 'yes',
+                    'count': yes_count,
+                    'pct': round(yes_count / total_answers, 3) if total_answers > 0 else 0
+                },
+                {
+                    'value': 'no', 
+                    'count': no_count,
+                    'pct': round(no_count / total_answers, 3) if total_answers > 0 else 0
+                }
+            ]
+            
+        elif question.question_type == 'rating':
+            # Calculate rating statistics
+            numeric_values = []
+            for text in answer_texts:
+                try:
+                    numeric_values.append(float(text))
+                except (ValueError, TypeError):
+                    pass
+            
+            if numeric_values:
+                avg_rating = mean(numeric_values)
+                median_rating = median(numeric_values)
+                
+                # Create histogram
+                histogram = defaultdict(int)
+                for value in numeric_values:
+                    bucket = str(int(value))  # Round to nearest integer for buckets
+                    histogram[bucket] += 1
+                
+                histogram_list = []
+                for bucket in sorted(histogram.keys(), key=lambda x: int(x)):
+                    histogram_list.append({
+                        'bucket': bucket,
+                        'count': histogram[bucket]
+                    })
+                
+                distributions['rating'] = {
+                    'avg': round(avg_rating, 2),
+                    'median': median_rating,
+                    'histogram': histogram_list
+                }
+            
+        elif question.question_type in ['text', 'textarea']:
+            # Text analysis
+            if include_personal:
+                # Show sample responses (limited to 5)
+                sample_texts = [text for text in answer_texts[:5] if text.strip()]
+                distributions['sample_text'] = sample_texts
+            else:
+                # Count basic statistics without revealing content
+                word_counts = []
+                for text in answer_texts:
+                    word_counts.append(len(text.split()) if text else 0)
+                
+                if word_counts:
+                    distributions['textual'] = {
+                        'avg_words': round(mean(word_counts), 1),
+                        'total_responses': len(word_counts)
+                    }
+                else:
+                    distributions['textual'] = {
+                        'avg_words': 0,
+                        'total_responses': 0
+                    }
+        
+        return distributions
+    
+    def _get_export_links(self, survey, include_personal):
+        """Generate export links"""
+        personal_param = 'true' if include_personal else 'false'
+        base_url = f"/api/surveys/surveys/{survey.id}/export/"
+        
+        return {
+            'csv': f"{base_url}?format=csv&include_personal_data={personal_param}",
+            'json': f"{base_url}?format=json&include_personal_data={personal_param}"
+        }
+
+
+class QuestionAnalyticsDashboardView(APIView):
+    """
+    Question-level analytics dashboard providing deep dive analysis per question.
+    
+    GET /api/surveys/admin/surveys/{survey_id}/questions/{question_id}/dashboard/
+    Access: Admin, Super Admin, or Survey Creator only
+    
+    Query Parameters:
+    - start (ISO datetime): Filter responses from this date
+    - end (ISO datetime): Filter responses until this date
+    - tz (timezone): Timezone for analysis (default: Asia/Dubai)
+    - group_by (day|week|month): Not used for question analysis but kept for API consistency
+    - include_personal (true|false): Include PII in text responses (default: false)
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, survey_id, question_id):
+        """Get detailed question analytics"""
+        try:
+            # Validate survey and question access
+            survey, question = self._get_survey_question_with_permission_check(request, survey_id, question_id)
+            if isinstance(survey, Response):  # Error response
+                return survey
+            
+            # Parse query parameters
+            params = self._parse_query_params(request)
+            
+            # Get filtered responses for this question
+            responses = self._get_filtered_responses(survey, params)
+            question_answers = Answer.objects.filter(
+                question=question,
+                response__in=responses
+            ).select_related('response', 'response__respondent')
+            
+            # Build question dashboard data
+            dashboard_data = {
+                'question': self._get_question_info(question),
+                'kpis': self._calculate_question_kpis(responses.count(), question_answers),
+                'analytics': self._get_detailed_question_analytics(question, question_answers, params['include_personal'])
+            }
+            
+            return uniform_response(
+                success=True,
+                message="Question analytics retrieved successfully",
+                data=dashboard_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating question analytics dashboard: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to generate question analytics",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _get_survey_question_with_permission_check(self, request, survey_id, question_id):
+        """Get survey and question with permission check"""
+        try:
+            survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            question = Question.objects.get(id=question_id, survey=survey)
+        except Survey.DoesNotExist:
+            return uniform_response(
+                success=False,
+                message="Survey not found",
+                status_code=status.HTTP_404_NOT_FOUND
+            ), None
+        except Question.DoesNotExist:
+            return uniform_response(
+                success=False,
+                message="Question not found in this survey",
+                status_code=status.HTTP_404_NOT_FOUND
+            ), None
+        
+        user = request.user
+        if not (user.role in ['admin', 'super_admin'] or user == survey.creator):
+            return uniform_response(
+                success=False,
+                message="Access denied. Only admins, super admins, or survey creators can view question analytics.",
+                status_code=status.HTTP_403_FORBIDDEN
+            ), None
+        
+        return survey, question
+    
+    def _parse_query_params(self, request):
+        """Parse query parameters (same as survey dashboard)"""
+        params = {
+            'start': None,
+            'end': None,
+            'tz': 'Asia/Dubai',
+            'include_personal': False
+        }
+        
+        # Parse start date
+        start_str = request.query_params.get('start')
+        if start_str:
+            try:
+                params['start'] = parse_datetime(start_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse end date
+        end_str = request.query_params.get('end')
+        if end_str:
+            try:
+                params['end'] = parse_datetime(end_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Parse include_personal
+        include_personal = request.query_params.get('include_personal', 'false').lower()
+        params['include_personal'] = include_personal in ['true', '1', 'yes']
+        
+        return params
+    
+    def _get_filtered_responses(self, survey, params):
+        """Get responses with date filtering"""
+        queryset = survey.responses.all()
+        
+        # Apply date filters
+        if params['start']:
+            queryset = queryset.filter(submitted_at__gte=params['start'])
+        if params['end']:
+            queryset = queryset.filter(submitted_at__lte=params['end'])
+        
+        return queryset
+    
+    def _get_question_info(self, question):
+        """Get question information"""
+        return {
+            'id': str(question.id),
+            'order': question.order,
+            'type': question.question_type,
+            'is_required': question.is_required,
+            'text': question.text
+        }
+    
+    def _calculate_question_kpis(self, total_responses, question_answers):
+        """Calculate question-level KPIs"""
+        answer_count = question_answers.count()
+        skipped_count = total_responses - answer_count
+        answer_rate = answer_count / total_responses if total_responses > 0 else 0.0
+        
+        return {
+            'answer_count': answer_count,
+            'skipped_count': skipped_count,
+            'answer_rate': round(answer_rate, 3)
+        }
+    
+    def _get_detailed_question_analytics(self, question, answers, include_personal):
+        """Get detailed analytics based on question type"""
+        analytics = {}
+        answer_texts = [answer.answer_text for answer in answers]
+        total_answers = len(answer_texts)
+        
+        if question.question_type == 'single_choice':
+            analytics['single_choice'] = self._analyze_single_choice(question, answer_texts, total_answers)
+            
+        elif question.question_type == 'multiple_choice':
+            analytics['multiple_choice'] = self._analyze_multiple_choice(question, answer_texts, total_answers)
+            
+        elif question.question_type == 'yes_no':
+            analytics['yes_no'] = self._analyze_yes_no(answer_texts, total_answers)
+            
+        elif question.question_type == 'rating':
+            analytics['rating'] = self._analyze_rating(answer_texts)
+            
+        elif question.question_type in ['text', 'textarea']:
+            analytics['textual'] = self._analyze_textual(answer_texts, include_personal)
+        
+        return analytics
+    
+    def _analyze_single_choice(self, question, answer_texts, total_answers):
+        """Analyze single choice question"""
+        try:
+            options = json.loads(question.options) if question.options else []
+        except (json.JSONDecodeError, TypeError):
+            options = []
+        
+        # Count responses for each option
+        option_counts = Counter(answer_texts)
+        
+        option_list = []
+        for option in options:
+            option_key = option['value'] if isinstance(option, dict) else option
+            option_label = option['label'] if isinstance(option, dict) else option
+            
+            count = option_counts.get(option_key, 0)
+            pct = count / total_answers if total_answers > 0 else 0
+            
+            option_list.append({
+                'label': option_label,
+                'count': count,
+                'pct': round(pct, 3)
+            })
+        
+        # Add any "other" responses not in predefined options
+        predefined_values = {option['value'] if isinstance(option, dict) else option for option in options}
+        for answer_text, count in option_counts.items():
+            if answer_text not in predefined_values:
+                pct = count / total_answers if total_answers > 0 else 0
+                option_list.append({
+                    'label': f'Other: {answer_text}',
+                    'count': count,
+                    'pct': round(pct, 3)
+                })
+        
+        return {'options': option_list}
+    
+    def _analyze_multiple_choice(self, question, answer_texts, total_answers):
+        """Analyze multiple choice question"""
+        try:
+            options = json.loads(question.options) if question.options else []
+        except (json.JSONDecodeError, TypeError):
+            options = []
+        
+        # Count how many respondents selected each option
+        option_counts = defaultdict(int)
+        
+        for answer_text in answer_texts:
+            try:
+                # Try parsing as JSON array first
+                if answer_text.startswith('['):
+                    selections = json.loads(answer_text)
+                else:
+                    # Split by comma as fallback
+                    selections = [s.strip() for s in answer_text.split(',')]
+                
+                for selection in selections:
+                    if selection:  # Skip empty selections
+                        option_counts[selection] += 1
+                        
+            except (json.JSONDecodeError, AttributeError):
+                # Single selection case
+                if answer_text:
+                    option_counts[answer_text] += 1
+        
+        option_list = []
+        for option in options:
+            option_key = option['value'] if isinstance(option, dict) else option
+            option_label = option['label'] if isinstance(option, dict) else option
+            
+            count = option_counts.get(option_key, 0)
+            respondent_pct = count / total_answers if total_answers > 0 else 0
+            
+            option_list.append({
+                'label': option_label,
+                'count': count,
+                'respondent_pct': round(respondent_pct, 3)  # Percentage of respondents who selected this
+            })
+        
+        # Add any "other" responses
+        predefined_values = {option['value'] if isinstance(option, dict) else option for option in options}
+        for selection, count in option_counts.items():
+            if selection not in predefined_values:
+                respondent_pct = count / total_answers if total_answers > 0 else 0
+                option_list.append({
+                    'label': f'Other: {selection}',
+                    'count': count,
+                    'respondent_pct': round(respondent_pct, 3)
+                })
+        
+        return {'options': option_list}
+    
+    def _analyze_yes_no(self, answer_texts, total_answers):
+        """Analyze yes/no question"""
+        yes_count = sum(1 for text in answer_texts if text.lower() in ['yes', 'true', '1', 'نعم'])
+        no_count = sum(1 for text in answer_texts if text.lower() in ['no', 'false', '0', 'لا'])
+        
+        result = []
+        for value, count in [('yes', yes_count), ('no', no_count)]:
+            pct = count / total_answers if total_answers > 0 else 0
+            result.append({
+                'value': value,
+                'count': count,
+                'pct': round(pct, 3)
+            })
+        
+        return result
+    
+    def _analyze_rating(self, answer_texts):
+        """Analyze rating question"""
+        numeric_values = []
+        for text in answer_texts:
+            try:
+                value = float(text)
+                numeric_values.append(value)
+            except (ValueError, TypeError):
+                pass
+        
+        if not numeric_values:
+            return {
+                'avg': 0,
+                'median': 0,
+                'histogram': []
+            }
+        
+        avg_rating = mean(numeric_values)
+        median_rating = median(numeric_values)
+        
+        # Create histogram (bucket by integer values)
+        histogram_data = defaultdict(int)
+        for value in numeric_values:
+            bucket = str(int(value))  # Round to nearest integer
+            histogram_data[bucket] += 1
+        
+        histogram = []
+        for bucket in sorted(histogram_data.keys(), key=lambda x: int(x)):
+            histogram.append({
+                'bucket': bucket,
+                'count': histogram_data[bucket]
+            })
+        
+        return {
+            'avg': round(avg_rating, 2),
+            'median': median_rating,
+            'histogram': histogram
+        }
+    
+    def _analyze_textual(self, answer_texts, include_personal):
+        """Analyze text/textarea questions"""
+        if not answer_texts:
+            return {
+                'top_terms': [],
+                'samples': []
+            }
+        
+        # Simple word frequency analysis (without PII if include_personal is False)
+        word_freq = defaultdict(int)
+        clean_texts = [text for text in answer_texts if text and text.strip()]
+        
+        if not include_personal:
+            # Return basic statistics without revealing content
+            word_counts = [len(text.split()) for text in clean_texts]
+            char_counts = [len(text) for text in clean_texts]
+            
+            return {
+                'response_count': len(clean_texts),
+                'avg_words': round(mean(word_counts), 1) if word_counts else 0,
+                'avg_chars': round(mean(char_counts), 1) if char_counts else 0,
+                'samples': []  # No samples when include_personal is False
+            }
+        
+        # When include_personal is True, provide more detailed analysis
+        for text in clean_texts:
+            # Simple word extraction (split by space and clean)
+            words = text.lower().split()
+            for word in words:
+                # Simple cleaning (remove punctuation)
+                clean_word = ''.join(c for c in word if c.isalnum())
+                if len(clean_word) > 2:  # Only include words longer than 2 characters
+                    word_freq[clean_word] += 1
+        
+        # Get top terms
+        top_terms = []
+        for word, count in sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]:
+            if count > 1:  # Only include words that appear more than once
+                top_terms.append({
+                    'term': word,
+                    'count': count
+                })
+        
+        # Get sample responses (up to 5)
+        samples = clean_texts[:5]
+        
+        return {
+            'top_terms': top_terms,
+            'samples': samples
+        }
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def health_check(request):
@@ -3037,6 +3992,405 @@ def health_check(request):
             'encryption': 'active'
         }
     )
+
+
+class SurveyQuestionsAnalyticsView(APIView):
+    """
+    Survey questions analytics overview providing summary analytics for all questions.
+    
+    GET /api/surveys/admin/surveys/{survey_id}/questions/analytics/dashboard/
+    Access: Admin, Super Admin, or Survey Creator only
+    
+    This endpoint provides an overview of analytics for all questions in a survey,
+    similar to the questions_summary section in the survey dashboard but with
+    more detailed analytics per question.
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, survey_id):
+        """Get analytics overview for all questions in a survey"""
+        try:
+            # Validate survey access
+            survey = self._get_survey_with_permission_check(request, survey_id)
+            if isinstance(survey, Response):  # Error response
+                return survey
+            
+            # Parse query parameters
+            params = self._parse_query_params(request)
+            
+            # Get filtered responses with optimized prefetch
+            responses = self._get_filtered_responses(survey, params)
+            
+            # Get questions with their analytics
+            questions = survey.questions.all().order_by('order')
+            questions_analytics = []
+            
+            for question in questions:
+                # Get answers for this question from filtered responses
+                question_answers = []
+                for response in responses:
+                    for answer in response.answers.all():
+                        if answer.question_id == question.id:
+                            question_answers.append(answer)
+                
+                # Calculate question KPIs
+                answer_count = len(question_answers)
+                skipped_count = len(responses) - answer_count
+                answer_rate = answer_count / len(responses) if responses else 0
+                
+                # Get detailed analytics for this question
+                analytics = self._get_detailed_question_analytics(question, question_answers, params['include_personal'])
+                
+                question_data = {
+                    'id': str(question.id),
+                    'text': question.text,
+                    'type': question.question_type,
+                    'is_required': question.is_required,
+                    'order': question.order,
+                    'kpis': {
+                        'answer_count': answer_count,
+                        'skipped_count': skipped_count,
+                        'answer_rate': round(answer_rate, 3),
+                        'total_eligible_responses': len(responses)
+                    },
+                    'analytics': analytics
+                }
+                
+                questions_analytics.append(question_data)
+            
+            # Build dashboard data
+            dashboard_data = {
+                'survey': {
+                    'id': str(survey.id),
+                    'title': survey.title,
+                    'total_questions': len(questions),
+                    'total_responses': len(responses)
+                },
+                'questions': questions_analytics,
+                'summary': {
+                    'total_questions': len(questions),
+                    'avg_answer_rate': round(sum(q['kpis']['answer_rate'] for q in questions_analytics) / len(questions_analytics) if questions_analytics else 0, 3),
+                    'total_responses': len(responses)
+                }
+            }
+            
+            return uniform_response(
+                success=True,
+                message="Survey questions analytics retrieved successfully",
+                data=dashboard_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating survey questions analytics: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to generate questions analytics",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _get_survey_with_permission_check(self, request, survey_id):
+        """Get survey with permission check (reuse from SurveyAnalyticsDashboardView)"""
+        try:
+            survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+        except Survey.DoesNotExist:
+            return uniform_response(
+                success=False,
+                message="Survey not found",
+                status_code=status.HTTP_404_NOT_FOUND
+            )
+        
+        user = request.user
+        if not (user.role in ['admin', 'super_admin'] or user == survey.creator):
+            return uniform_response(
+                success=False,
+                message="Access denied. Only admins, super admins, or survey creators can view analytics.",
+                status_code=status.HTTP_403_FORBIDDEN
+            )
+        
+        return survey
+    
+    def _parse_query_params(self, request):
+        """Parse query parameters (same logic as other analytics views)"""
+        params = {
+            'start': None,
+            'end': None,
+            'tz': 'Asia/Dubai',
+            'include_personal': False
+        }
+        
+        # Parse start date
+        start = request.query_params.get('start')
+        if start:
+            try:
+                params['start'] = parse_datetime(start)
+            except ValueError:
+                pass
+        
+        # Parse end date
+        end = request.query_params.get('end')
+        if end:
+            try:
+                params['end'] = parse_datetime(end)
+            except ValueError:
+                pass
+        
+        # Parse timezone
+        tz = request.query_params.get('tz', 'Asia/Dubai')
+        try:
+            pytz.timezone(tz)
+            params['tz'] = tz
+        except pytz.exceptions.UnknownTimeZoneError:
+            pass
+        
+        # Parse include_personal
+        include_personal = request.query_params.get('include_personal', 'false').lower()
+        params['include_personal'] = include_personal in ['true', '1', 'yes']
+        
+        return params
+    
+    def _get_filtered_responses(self, survey, params):
+        """Get filtered responses (same logic as other analytics views)"""
+        responses = SurveyResponse.objects.filter(
+            survey=survey
+        ).prefetch_related(
+            'answers',
+            'answers__question'
+        ).select_related('respondent')
+        
+        # Apply date filtering
+        if params['start']:
+            responses = responses.filter(submitted_at__gte=params['start'])
+        if params['end']:
+            responses = responses.filter(submitted_at__lte=params['end'])
+        
+        return responses
+    
+    def _get_detailed_question_analytics(self, question, question_answers, include_personal):
+        """Get detailed analytics for a specific question type (reuse from QuestionAnalyticsDashboardView)"""
+        distributions = {}
+        answer_texts = []
+        answer_values = []
+        
+        for answer in question_answers:
+            if answer.answer_text:
+                answer_texts.append(answer.answer_text)
+                # For choice questions, the answer_text contains the selected values
+                answer_values.append(answer.answer_text)
+        
+        if question.question_type == 'single_choice':
+            # Single choice analytics
+            if answer_values and question.options:
+                import json
+                from collections import Counter
+                try:
+                    options = json.loads(question.options) if question.options else []
+                except (json.JSONDecodeError, TypeError):
+                    options = []
+                
+                if options:
+                    value_counts = Counter(answer_values)
+                    total = len(answer_values)
+                    
+                    option_results = []
+                    for option in options:
+                        count = value_counts.get(option, 0)
+                        pct = count / total if total > 0 else 0
+                        
+                        option_results.append({
+                            'label': option,
+                            'value': option,
+                            'count': count,
+                            'pct': round(pct, 3)
+                        })
+                    
+                    # Find top choice
+                    top_choice = None
+                    if option_results:
+                        top_option = max(option_results, key=lambda x: x['count'])
+                        top_choice = {
+                            'label': top_option['label'],
+                            'count': top_option['count'],
+                            'pct': top_option['pct']
+                        }
+                    
+                    distributions['single_choice'] = {
+                        'options': sorted(option_results, key=lambda x: x['count'], reverse=True),
+                        'top_choice': top_choice
+                    }
+        
+        elif question.question_type == 'multiple_choice':
+            # Multiple choice analytics
+            if answer_texts and question.options:
+                import json
+                from collections import Counter
+                try:
+                    options = json.loads(question.options) if question.options else []
+                except (json.JSONDecodeError, TypeError):
+                    options = []
+                
+                if options:
+                    all_selections = []
+                    
+                    for text in answer_texts:
+                        if text:
+                            selections = [choice.strip() for choice in text.split(',')]
+                            all_selections.extend(selections)
+                    
+                    value_counts = Counter(all_selections)
+                    total_selections = len(all_selections)
+                    respondents = len(answer_texts)
+                    
+                    option_results = []
+                    for option in options:
+                        count = value_counts.get(option, 0)
+                        pct = count / respondents if respondents > 0 else 0
+                        
+                        option_results.append({
+                            'label': option,
+                            'value': option,
+                            'count': count,
+                            'pct': round(pct, 3),
+                            'selected_by_respondents': count
+                        })
+                    
+                    # Find most popular
+                    most_popular = None
+                    if option_results:
+                        top_option = max(option_results, key=lambda x: x['count'])
+                        most_popular = {
+                            'label': top_option['label'],
+                            'count': top_option['count'],
+                            'pct': top_option['pct']
+                        }
+                    
+                    distributions['multiple_choice'] = {
+                        'options': sorted(option_results, key=lambda x: x['count'], reverse=True),
+                        'total_selections': total_selections,
+                        'avg_selections_per_respondent': round(total_selections / respondents, 2) if respondents > 0 else 0,
+                    'most_popular': most_popular
+                }
+        
+        elif question.question_type == 'yes_no':
+            # Yes/No analytics
+            if answer_values:
+                from collections import Counter
+                value_counts = Counter(answer_values)
+                total = len(answer_values)
+                
+                yes_no_data = []
+                for value in ['yes', 'no']:
+                    count = value_counts.get(value, 0)
+                    pct = count / total if total > 0 else 0
+                    
+                    yes_no_data.append({
+                        'value': value,
+                        'label': value.title(),
+                        'count': count,
+                        'pct': round(pct, 3)
+                    })
+                
+                distributions['yes_no'] = yes_no_data
+        
+        elif question.question_type == 'rating':
+            # Rating analytics with statistics
+            numeric_values = []
+            for answer in question_answers:
+                if answer.answer_text:
+                    try:
+                        numeric_values.append(float(answer.answer_text))
+                    except (ValueError, TypeError):
+                        pass
+            
+            if numeric_values:
+                from statistics import mean, median
+                avg_rating = mean(numeric_values)
+                median_rating = median(numeric_values)
+                
+                # Create histogram
+                from collections import defaultdict
+                histogram = defaultdict(int)
+                for value in numeric_values:
+                    bucket = str(int(value))  # Round to nearest integer for buckets
+                    histogram[bucket] += 1
+                
+                histogram_list = []
+                for bucket in sorted(histogram.keys(), key=lambda x: int(x)):
+                    total = len(numeric_values)
+                    count = histogram[bucket]
+                    pct = count / total if total > 0 else 0
+                    
+                    histogram_list.append({
+                        'rating': int(bucket),
+                        'count': count,
+                        'pct': round(pct, 3)
+                    })
+                
+                distributions['rating'] = {
+                    'avg': round(avg_rating, 2),
+                    'median': median_rating,
+                    'mode': max(histogram.keys(), key=lambda x: histogram[x]) if histogram else None,
+                    'min': min(numeric_values),
+                    'max': max(numeric_values),
+                    'histogram': histogram_list
+                }
+        
+        elif question.question_type in ['text', 'textarea']:
+            # Text analysis
+            if answer_texts:
+                word_counts = []
+                char_counts = []
+                
+                for text in answer_texts:
+                    if text and text.strip():
+                        word_count = len(text.split())
+                        char_count = len(text)
+                        word_counts.append(word_count)
+                        char_counts.append(char_count)
+                
+                if word_counts and char_counts:
+                    from statistics import mean
+                    # Categorize by length
+                    short_count = sum(1 for c in char_counts if c < 50)
+                    medium_count = sum(1 for c in char_counts if 50 <= c <= 200)
+                    long_count = sum(1 for c in char_counts if c > 200)
+                    total = len(char_counts)
+                    
+                    distributions['textual'] = {
+                        'total_responses': total,
+                        'avg_word_count': round(mean(word_counts), 1),
+                        'avg_char_count': round(mean(char_counts), 1),
+                        'response_lengths': {
+                            'short': {
+                                'count': short_count, 
+                                'pct': round(short_count / total, 3) if total > 0 else 0,
+                                'description': '< 50 characters'
+                            },
+                            'medium': {
+                                'count': medium_count,
+                                'pct': round(medium_count / total, 3) if total > 0 else 0,
+                                'description': '50-200 characters'
+                            },
+                            'long': {
+                                'count': long_count,
+                                'pct': round(long_count / total, 3) if total > 0 else 0,
+                                'description': '> 200 characters'
+                            }
+                        }
+                    }
+                else:
+                    distributions['textual'] = {
+                        'total_responses': 0,
+                        'avg_word_count': 0,
+                        'avg_char_count': 0,
+                        'response_lengths': {
+                            'short': {'count': 0, 'pct': 0, 'description': '< 50 characters'},
+                            'medium': {'count': 0, 'pct': 0, 'description': '50-200 characters'},
+                            'long': {'count': 0, 'pct': 0, 'description': '> 200 characters'}
+                        }
+                    }
+        
+        return distributions
 
 
 # Admin APIs - Survey Response Management
@@ -3270,6 +4624,11 @@ class AdminSurveyResponsesView(generics.ListAPIView):
             return SurveyResponse.objects.none()
         
         survey_id = self.kwargs.get('survey_id')
+        
+        # Validate survey ID
+        if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+            return SurveyResponse.objects.none()
+            
         survey = get_object_or_404(Survey, id=survey_id, deleted_at__isnull=True)
         
         # Allow access if user is admin, super_admin, or the survey creator
@@ -4116,5 +5475,106 @@ class PasswordProtectedSurveyResponseView(APIView):
             return uniform_response(
                 success=False,
                 message="Failed to submit response",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SurveyDraftView(APIView):
+    """
+    Create and manage survey drafts.
+    POST /api/surveys/draft/ - Create a new survey draft
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Create a new survey draft"""
+        try:
+            # Pass request context to serializer so it can access the user
+            serializer = SurveySerializer(data=request.data, context={'request': request})
+            serializer.is_valid(raise_exception=True)
+            
+            # Create survey as draft - the serializer will handle setting the creator
+            survey = serializer.save(status='draft')
+            
+            return uniform_response(
+                success=True,
+                message="Survey draft created successfully",
+                data=serializer.data,
+                status_code=status.HTTP_201_CREATED
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating survey draft: {e}")
+            return uniform_response(
+                success=False,
+                message=str(e),
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class SurveySubmitView(APIView):
+    """
+    Submit survey to make it final and non-editable.
+    POST /api/surveys/submit/ - Submit a draft survey
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Submit a survey (make it final)"""
+        try:
+            survey_id = request.data.get('survey_id')
+            if not survey_id:
+                return uniform_response(
+                    success=False,
+                    message="Survey ID is required",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            except Survey.DoesNotExist:
+                return uniform_response(
+                    success=False,
+                    message="Survey not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check permissions
+            user = request.user
+            if user.role != 'super_admin' and survey.creator != user:
+                return uniform_response(
+                    success=False,
+                    message="You can only submit surveys you created",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Check if survey is already submitted
+            if survey.status == 'submitted':
+                return uniform_response(
+                    success=False,
+                    message="Survey is already submitted",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Submit the survey
+            survey.submit()
+            
+            # Serialize the updated survey with proper context
+            serializer = SurveySerializer(survey, context={'request': request})
+            
+            return uniform_response(
+                success=True,
+                message="Survey submitted successfully. It is now final and cannot be edited.",
+                data=serializer.data,
+                status_code=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            logger.error(f"Error submitting survey: {e}")
+            return uniform_response(
+                success=False,
+                message="An error occurred while submitting the survey",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
