@@ -327,5 +327,3 @@ INFO 2025-08-22 01:57:35,264 views 25192 5168 Building queryset for user seif778
 INFO 2025-08-22 01:57:35,342 views 25192 5168 Successfully built queryset for user seif778811@gmail.com
 INFO 2025-08-22 01:57:40,846 dual_auth 25192 17936 User seif778811@gmail.com authenticated with regular JWT (universal)
 INFO 2025-08-22 01:57:40,895 dual_auth 25192 3208 User seif778811@gmail.com authenticated with regular JWT (universal)
-INFO 2025-08-22 01:58:30,163 dual_auth 25192 3208 User seif778811@gmail.com authenticated with regular JWT (universal)
-INFO 2025-08-22 01:58:30,164 views 25192 3208 User logged out without token blacklisting: seif778811@gmail.com

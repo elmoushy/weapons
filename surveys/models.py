@@ -209,7 +209,7 @@ class Survey(models.Model):
         help_text='Whether survey is active and accepting responses'
     )
     
-    # Public survey contact method settings
+    # Public survey access settings
     CONTACT_METHOD_CHOICES = [
         ('email', 'Email'),
         ('phone', 'Phone'),
@@ -219,6 +219,14 @@ class Survey(models.Model):
         choices=CONTACT_METHOD_CHOICES,
         default='email',
         help_text='Contact method required for public survey submissions (email or phone)'
+    )
+    
+    # Per-device access control for PUBLIC surveys
+    per_device_access = models.BooleanField(
+        default=False,
+        null=False,
+        blank=False,
+        help_text='If enabled, survey can only be filled once per device (no email/phone required)'
     )
     
     # Draft/Submit status
@@ -329,6 +337,17 @@ class Survey(models.Model):
         """Override save to generate title hash and handle date logic with UAE timezone"""
         if self.title:
             self.title_hash = hashlib.sha256(self.title.encode('utf-8')).hexdigest()
+        
+        # Debug: Log the current per_device_access value
+        logger.info(f"Survey.save() - per_device_access before check: {self.per_device_access} (type: {type(self.per_device_access)})")
+        
+        # Ensure per_device_access is never None - default to False
+        if self.per_device_access is None:
+            self.per_device_access = False
+            logger.info(f"Survey.save() - Set per_device_access to False due to None value")
+        
+        # Debug: Log the final per_device_access value
+        logger.info(f"Survey.save() - per_device_access final value: {self.per_device_access}")
         
         # If only end_date is provided, set start_date to created_at (or now if updating)
         if self.end_date and not self.start_date:
@@ -482,8 +501,12 @@ class Response(models.Model):
             if existing.exists():
                 raise ValidationError("You have already submitted a response to this survey.")
         
+        # For per-device access surveys, device tracking is handled separately
+        # The validation will be done in the views before creating the response
+        
         # Check for anonymous user duplicate responses (same email or phone based on survey settings)
-        elif self.respondent_email or self.respondent_phone:
+        elif not self.survey.per_device_access and (self.respondent_email or self.respondent_phone):
+            # Only check email/phone duplicates if not using per-device access
             # Determine which contact method to check based on survey settings
             if self.survey.public_contact_method == 'email' and self.respondent_email:
                 existing = Response.objects.filter(
@@ -506,6 +529,134 @@ class Response(models.Model):
         """Override save to call clean validation."""
         self.clean()
         super().save(*args, **kwargs)
+
+
+class DeviceResponse(models.Model):
+    """
+    Track survey responses by device fingerprint for per-device access control.
+    This model stores device fingerprints to prevent multiple submissions from the same device.
+    """
+    
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    survey = models.ForeignKey(
+        Survey,
+        on_delete=models.CASCADE,
+        related_name='device_responses',
+        help_text='Survey this device response belongs to'
+    )
+    device_fingerprint = models.CharField(
+        max_length=64,
+        help_text='SHA256 hash of device fingerprint (User-Agent + Screen Resolution + Timezone + Language)'
+    )
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        help_text='IP address of the device'
+    )
+    user_agent = models.TextField(
+        null=True,
+        blank=True,
+        help_text='User agent string from the device'
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    
+    # Link to the actual response if created
+    response = models.OneToOneField(
+        'Response',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='device_tracking',
+        help_text='Associated response object'
+    )
+    
+    class Meta:
+        db_table = 'surveys_device_response'
+        verbose_name = 'Device Response'
+        verbose_name_plural = 'Device Responses'
+        unique_together = ['survey', 'device_fingerprint']
+        indexes = [
+            models.Index(fields=['survey', 'device_fingerprint'], name='surveys_device_survey_fp_idx'),
+            models.Index(fields=['device_fingerprint'], name='surveys_device_fp_idx'),
+        ]
+        ordering = ['-submitted_at']
+    
+    def __str__(self):
+        return f"Device response to {self.survey.title} ({self.device_fingerprint[:12]}...)"
+    
+    @classmethod
+    def generate_device_fingerprint(cls, request):
+        """
+        Generate a device fingerprint from request data.
+        
+        Args:
+            request: Django request object
+            
+        Returns:
+            str: SHA256 hash of device characteristics
+        """
+        # Get basic device information from request
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        accept_language = request.META.get('HTTP_ACCEPT_LANGUAGE', '')
+        accept_encoding = request.META.get('HTTP_ACCEPT_ENCODING', '')
+        
+        # Get additional device info from custom headers (if provided by frontend)
+        screen_resolution = request.META.get('HTTP_X_SCREEN_RESOLUTION', '')
+        timezone = request.META.get('HTTP_X_TIMEZONE', '')
+        platform = request.META.get('HTTP_X_PLATFORM', '')
+        
+        # Combine all available device characteristics
+        device_info = f"{user_agent}|{accept_language}|{accept_encoding}|{screen_resolution}|{timezone}|{platform}"
+        
+        # Generate SHA256 hash
+        return hashlib.sha256(device_info.encode('utf-8')).hexdigest()
+    
+    @classmethod
+    def has_device_submitted(cls, survey, request):
+        """
+        Check if a device has already submitted a response to this survey.
+        
+        Args:
+            survey: Survey instance
+            request: Django request object
+            
+        Returns:
+            bool: True if device has already submitted, False otherwise
+        """
+        device_fingerprint = cls.generate_device_fingerprint(request)
+        return cls.objects.filter(
+            survey=survey,
+            device_fingerprint=device_fingerprint
+        ).exists()
+    
+    @classmethod
+    def create_device_tracking(cls, survey, request, response=None):
+        """
+        Create a device tracking record.
+        
+        Args:
+            survey: Survey instance
+            request: Django request object
+            response: Response instance (optional)
+            
+        Returns:
+            DeviceResponse: Created device response record
+        """
+        device_fingerprint = cls.generate_device_fingerprint(request)
+        ip_address = request.META.get('REMOTE_ADDR')
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        
+        return cls.objects.create(
+            survey=survey,
+            device_fingerprint=device_fingerprint,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            response=response
+        )
 
 
 class Answer(models.Model):

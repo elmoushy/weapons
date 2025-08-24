@@ -59,7 +59,7 @@ def create_surveys_tables(apps, schema_editor):
             WHERE type='table' AND name='SURVEYS_SURVEY'
         """)
         if cursor.fetchone():
-            print("✅ SURVEYS tables already exist, skipping creation...")
+            print("SUCCESS: SURVEYS tables already exist, skipping creation...")
             return
         # Create SURVEYS_SURVEY table
         try:
@@ -238,14 +238,14 @@ def create_surveys_tables(apps, schema_editor):
         
         # Create SURVEYS_SURVEY_SHARED_WITH_GROUPS table (many-to-many)
         try:
-            print("🔧 Creating SURVEYS_SURVEY_SHARED_WITH_GROUPS table...")
+            print("Creating SURVEYS_SURVEY_SHARED_WITH_GROUPS table...")
             
             # Get exact column types from existing tables
             try:
                 survey_id_type = _oracle_type_for(cursor, "SURVEYS_SURVEY", "ID")
                 group_id_type = _oracle_type_for(cursor, "AUTHENTICATION_GROUP", "ID")
             except RuntimeError as e:
-                print(f"❌ Error getting column types: {e}")
+                print(f"ERROR: Error getting column types: {e}")
                 # Fallback to hardcoded types if tables don't exist yet
                 survey_id_type = "RAW(16)"
                 group_id_type = "NUMBER(38)"
@@ -284,7 +284,7 @@ def create_surveys_tables(apps, schema_editor):
                         UNIQUE (SURVEY_ID, GROUP_ID)
                 )
             """)
-            print("   ✅ Table created")
+            print("   SUCCESS: Table created")
             
             # Create sequence for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
             cursor.execute("""
@@ -293,7 +293,7 @@ def create_surveys_tables(apps, schema_editor):
                 INCREMENT BY 1
                 NOCACHE
             """)
-            print("   ✅ Sequence created")
+            print("   SUCCESS: Sequence created")
             
             # Create trigger for SURVEYS_SURVEY_SHARED_WITH_GROUPS ID
             cursor.execute("""
@@ -306,8 +306,8 @@ def create_surveys_tables(apps, schema_editor):
                     END IF;
                 END;
             """)
-            print("   ✅ Trigger created")
-            print("✅ SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation complete!")
+            print("   SUCCESS: Trigger created")
+            print("SUCCESS: SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation complete!")
         
         except Exception as e:
             print(f"SURVEYS_SURVEY_SHARED_WITH_GROUPS table creation skipped: {e}")
@@ -353,7 +353,7 @@ def create_surveys_tables(apps, schema_editor):
                 # Index might already exist, continue
                 pass
         
-        print("   ✅ Indexes created")
+        print("   SUCCESS: Indexes created")
 
 
 def drop_surveys_tables(apps, schema_editor):

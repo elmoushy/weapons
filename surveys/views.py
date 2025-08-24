@@ -512,6 +512,12 @@ class SurveyViewSet(ModelViewSet):
         try:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
+            
+            # Debug: Log the validated data to see what's being passed
+            validated_data = serializer.validated_data
+            logger.info(f"Validated data for survey creation: {validated_data}")
+            logger.info(f"per_device_access value: {validated_data.get('per_device_access', 'NOT FOUND')}")
+            
             # Always create new surveys as drafts
             survey = serializer.save(creator=request.user, status='draft')
             
@@ -1883,6 +1889,7 @@ class SurveyViewSet(ModelViewSet):
                     'description': survey.description,
                     'visibility': survey.visibility,
                     'public_contact_method': survey.public_contact_method,
+                    'per_device_access': survey.per_device_access,
                     'status': survey.get_status(),
                     'is_currently_active': survey.is_currently_active(),
                     'start_date': survey.start_date.isoformat() if survey.start_date else None,
@@ -2000,6 +2007,7 @@ class SurveyViewSet(ModelViewSet):
                     'title': survey.title,
                     'description': survey.description,
                     'public_contact_method': survey.public_contact_method,
+                    'per_device_access': survey.per_device_access,
                     'estimated_time': max(survey.questions.count() * 1, 5),  # 1 min per question, min 5 min
                     'questions_count': survey.questions.count(),
                     'questions': question_serializer.data
@@ -3310,18 +3318,33 @@ class SurveyResponseSubmissionView(APIView):
         
         # Handle different visibility levels
         if survey.visibility == "PUBLIC":
-            # Public surveys require email or phone for anonymous users based on survey settings
-            if request.user.is_authenticated:
-                return True, request.user, None
-            else:
-                required_method = survey.public_contact_method
-                if required_method == 'email' and email:
-                    return True, email, None
-                elif required_method == 'phone' and phone:
-                    return True, phone, None
+            # Check if survey uses per-device access
+            if survey.per_device_access:
+                # For per-device access, no email/phone required but check device
+                from .models import DeviceResponse
+                
+                # Check if device has already submitted
+                if DeviceResponse.has_device_submitted(survey, request):
+                    return False, None, "This device has already submitted a response to this survey"
+                
+                # Allow access without email/phone requirement
+                if request.user.is_authenticated:
+                    return True, request.user, None
                 else:
-                    contact_type = "Email" if required_method == 'email' else "Phone"
-                    return False, None, f"{contact_type} is required for public survey responses"
+                    return True, "anonymous_device", None
+            else:
+                # Standard PUBLIC survey - require email or phone for anonymous users
+                if request.user.is_authenticated:
+                    return True, request.user, None
+                else:
+                    required_method = survey.public_contact_method
+                    if required_method == 'email' and email:
+                        return True, email, None
+                    elif required_method == 'phone' and phone:
+                        return True, phone, None
+                    else:
+                        contact_type = "Email" if required_method == 'email' else "Phone"
+                        return False, None, f"{contact_type} is required for public survey responses"
         
         elif survey.visibility == "AUTH":
             # Authentication required
@@ -3387,43 +3410,52 @@ class SurveyResponseSubmissionView(APIView):
             
             # Determine respondent details for duplicate check
             respondent = user_or_contact if isinstance(user_or_contact, User) else None
-            respondent_email = user_or_contact if isinstance(user_or_contact, str) and '@' in user_or_contact else None
-            respondent_phone = user_or_contact if isinstance(user_or_contact, str) and '@' not in user_or_contact else None
+            respondent_email = None
+            respondent_phone = None
             
-            # Check for duplicate submissions
+            # Handle per-device access differently
+            if survey.per_device_access and user_or_contact == "anonymous_device":
+                # For per-device access, no email/phone needed
+                pass  
+            elif isinstance(user_or_contact, str) and user_or_contact != "anonymous_device":
+                respondent_email = user_or_contact if '@' in user_or_contact else None
+                respondent_phone = user_or_contact if '@' not in user_or_contact else None
+            
+            # Check for duplicate submissions (skip for per-device access as it's handled in validation)
             existing_response = None
-            if respondent:
-                # Check by authenticated user only
-                existing_response = SurveyResponse.objects.filter(
-                    survey=survey,
-                    respondent=respondent
-                ).first()
-            elif respondent_email:
-                # Check by email for anonymous users only (don't cross-check with authenticated users)
-                existing_response = SurveyResponse.objects.filter(
-                    survey=survey,
-                    respondent__isnull=True,  # Only check anonymous responses
-                    respondent_email=respondent_email
-                ).first()
-            elif respondent_phone:
-                # Check by phone for anonymous users only
-                existing_response = SurveyResponse.objects.filter(
-                    survey=survey,
-                    respondent__isnull=True,  # Only check anonymous responses
-                    respondent_phone=respondent_phone
-                ).first()
-            
-            if existing_response:
-                arabic_messages = get_arabic_error_messages()
-                return uniform_response(
-                    success=False,
-                    message=arabic_messages['already_submitted'],
-                    data={
-                        'existing_response_id': str(existing_response.id),
-                        'submitted_at': existing_response.submitted_at.isoformat()
-                    },
-                    status_code=status.HTTP_409_CONFLICT
-                )
+            if not survey.per_device_access:
+                if respondent:
+                    # Check by authenticated user only
+                    existing_response = SurveyResponse.objects.filter(
+                        survey=survey,
+                        respondent=respondent
+                    ).first()
+                elif respondent_email:
+                    # Check by email for anonymous users only (don't cross-check with authenticated users)
+                    existing_response = SurveyResponse.objects.filter(
+                        survey=survey,
+                        respondent__isnull=True,  # Only check anonymous responses
+                        respondent_email=respondent_email
+                    ).first()
+                elif respondent_phone:
+                    # Check by phone for anonymous users only
+                    existing_response = SurveyResponse.objects.filter(
+                        survey=survey,
+                        respondent__isnull=True,  # Only check anonymous responses
+                        respondent_phone=respondent_phone
+                    ).first()
+                
+                if existing_response:
+                    arabic_messages = get_arabic_error_messages()
+                    return uniform_response(
+                        success=False,
+                        message=arabic_messages['already_submitted'],
+                        data={
+                            'existing_response_id': str(existing_response.id),
+                            'submitted_at': existing_response.submitted_at.isoformat()
+                        },
+                        status_code=status.HTTP_409_CONFLICT
+                    )
             
             # Create survey response
             survey_response = SurveyResponse.objects.create(
@@ -3433,6 +3465,11 @@ class SurveyResponseSubmissionView(APIView):
                 respondent_email=respondent_email,  # Store email for anonymous responses
                 respondent_phone=respondent_phone   # Store phone for anonymous responses
             )
+            
+            # Create device tracking record if per-device access is enabled
+            if survey.per_device_access:
+                from .models import DeviceResponse
+                DeviceResponse.create_device_tracking(survey, request, survey_response)
             
             # Create answers
             created_answers = []
@@ -5429,6 +5466,7 @@ class TokenSurveysView(APIView):
                 'title': survey.title,
                 'description': survey.description,
                 'public_contact_method': survey.public_contact_method,
+                'per_device_access': survey.per_device_access,
                 'estimated_time': max(survey.questions.count() * 1, 5),
                 'questions_count': survey.questions.count(),
                 'visibility': survey.visibility,
@@ -5546,6 +5584,7 @@ class TokenSurveyDetailView(APIView):
                 'is_active': survey.is_active,
                 'is_locked': survey.is_locked,
                 'public_contact_method': survey.public_contact_method,
+                'per_device_access': survey.per_device_access,
                 'estimated_time': max(survey.questions.count() * 1, 5),
                 'questions_count': survey.questions.count(),
                 'created_at': survey.created_at.isoformat(),
@@ -5828,6 +5867,7 @@ class PasswordProtectedSurveyView(APIView):
                 'is_active': survey.is_active,
                 'is_locked': survey.is_locked,
                 'public_contact_method': survey.public_contact_method,
+                'per_device_access': survey.per_device_access,
                 'estimated_time': max(survey.questions.count() * 1, 5),
                 'questions_count': survey.questions.count(),
                 'created_at': survey.created_at.isoformat(),

@@ -172,7 +172,7 @@ class SurveySerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'visibility', 'shared_with',
             'creator', 'creator_email', 'is_locked', 'is_active',
             'start_date', 'end_date', 'status', 'status_display', 'is_currently_active',
-            'can_be_edited', 'public_contact_method', 'questions', 'response_count', 
+            'can_be_edited', 'public_contact_method', 'per_device_access', 'questions', 'response_count', 
             'shared_with_emails', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'creator', 'created_at', 'updated_at', 'status_display', 'is_currently_active', 'can_be_edited']
@@ -253,6 +253,16 @@ class SurveySerializer(serializers.ModelSerializer):
         
         return {}
     
+    def to_internal_value(self, data):
+        """Ensure per_device_access always has a value"""
+        # Ensure per_device_access is never None and defaults to False
+        if 'per_device_access' not in data:
+            data['per_device_access'] = False
+        elif data.get('per_device_access') is None:
+            data['per_device_access'] = False
+        
+        return super().to_internal_value(data)
+    
     def validate(self, data):
         """Enhanced validation with security checks"""
         request = self.context.get('request')
@@ -273,6 +283,23 @@ class SurveySerializer(serializers.ModelSerializer):
                 "Cannot share survey when visibility is not PRIVATE"
             )
         
+        # Validate per_device_access - only available for PUBLIC surveys
+        per_device_access = data.get('per_device_access', False)
+        if per_device_access and visibility != 'PUBLIC':
+            raise serializers.ValidationError(
+                "Per-device access is only available for PUBLIC surveys"
+            )
+        
+        # Validate date logic
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        
+        # If both dates are provided, ensure start_date is before end_date
+        if start_date and end_date and start_date >= end_date:
+            raise serializers.ValidationError(
+                "Start date must be before end date."
+            )
+        
         return data
     
     def create(self, validated_data):
@@ -280,11 +307,24 @@ class SurveySerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         validated_data['creator'] = request.user
         
+        # Ensure per_device_access is never None
+        if 'per_device_access' not in validated_data:
+            validated_data['per_device_access'] = False
+        elif validated_data['per_device_access'] is None:
+            validated_data['per_device_access'] = False
+            
+        # Debug: Log the validated data in serializer create
+        logger.info(f"Serializer create - per_device_access: {validated_data.get('per_device_access')}")
+        logger.info(f"Serializer create - all validated_data keys: {list(validated_data.keys())}")
+        
         # Extract questions data before creating survey
         questions_data = validated_data.pop('questions', [])
         
         # Handle shared_with separately
         shared_with = validated_data.pop('shared_with', [])
+        
+        # Debug: Log data just before Survey.objects.create
+        logger.info(f"About to create survey with data: {validated_data}")
         survey = Survey.objects.create(**validated_data)
         
         if validated_data.get('visibility') == 'PRIVATE':
@@ -299,6 +339,10 @@ class SurveySerializer(serializers.ModelSerializer):
     
     def update(self, instance, validated_data):
         """Update survey and handle nested questions"""
+        # Ensure per_device_access is never None
+        if 'per_device_access' in validated_data and validated_data['per_device_access'] is None:
+            validated_data['per_device_access'] = False
+        
         # Extract questions data before updating survey
         questions_data = validated_data.pop('questions', None)
         

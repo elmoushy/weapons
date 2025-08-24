@@ -331,6 +331,7 @@ LOGGING = {
             'class': 'logging.FileHandler',
             'filename': BASE_DIR / 'logs' / 'django.log',
             'formatter': 'verbose',
+            'encoding': 'utf-8',
         },
     },
     'loggers': {
