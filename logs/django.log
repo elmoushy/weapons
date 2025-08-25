@@ -327,3 +327,10 @@ INFO 2025-08-22 01:57:35,264 views 25192 5168 Building queryset for user seif778
 INFO 2025-08-22 01:57:35,342 views 25192 5168 Successfully built queryset for user seif778811@gmail.com
 INFO 2025-08-22 01:57:40,846 dual_auth 25192 17936 User seif778811@gmail.com authenticated with regular JWT (universal)
 INFO 2025-08-22 01:57:40,895 dual_auth 25192 3208 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-25 11:59:11,877 0012_fix_oracle_default_value 22240 25896 SUCCESS: Reversed default value for per_device_access
+INFO 2025-08-25 11:59:12,273 0011_ensure_oracle_boolean_field 22240 25896 SUCCESS: Reversed Oracle boolean field constraints
+INFO 2025-08-25 12:00:09,142 0011_ensure_oracle_boolean_field 17220 21524 Updated 0 NULL per_device_access values to 0
+INFO 2025-08-25 12:00:09,472 0011_ensure_oracle_boolean_field 17220 21524 Current column: TYPE=NUMBER, NULLABLE=N, DEFAULT=0 , LENGTH=22, PRECISION=1, SCALE=0
+INFO 2025-08-25 12:00:09,472 0011_ensure_oracle_boolean_field 17220 21524 SUCCESS: Column already properly configured
+INFO 2025-08-25 12:00:09,726 0012_fix_oracle_default_value 17220 21524 SUCCESS: Set default value to 0 for per_device_access
+INFO 2025-08-25 12:00:09,931 0012_fix_oracle_default_value 17220 21524 SUCCESS: Check constraint already exists

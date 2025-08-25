@@ -77,16 +77,63 @@ def create_device_response_table(apps, schema_editor):
         
         with connection.cursor() as cursor:
             if connection.vendor == 'oracle':
-                # Create table for Oracle
-                cursor.execute("""
+                # Get the exact column types from existing tables to ensure compatibility
+                try:
+                    # Get the exact type of the survey.id column
+                    cursor.execute("""
+                        SELECT data_type, data_length, data_precision, data_scale
+                        FROM user_tab_columns 
+                        WHERE table_name = 'SURVEYS_SURVEY' AND column_name = 'ID'
+                    """)
+                    survey_type_info = cursor.fetchone()
+                    
+                    # Get the exact type of the response.id column  
+                    cursor.execute("""
+                        SELECT data_type, data_length, data_precision, data_scale
+                        FROM user_tab_columns 
+                        WHERE table_name = 'SURVEYS_RESPONSE' AND column_name = 'ID'
+                    """)
+                    response_type_info = cursor.fetchone()
+                    
+                    if not survey_type_info or not response_type_info:
+                        raise RuntimeError("Could not find survey or response table column types")
+                        
+                    # Build exact type strings
+                    def build_type_string(type_info):
+                        data_type, data_length, data_precision, data_scale = type_info
+                        if data_type == 'RAW' and data_length:
+                            return f"RAW({int(data_length)})"
+                        elif data_type == 'NUMBER':
+                            if data_precision is None:
+                                return "NUMBER"
+                            elif data_scale is None or int(data_scale) == 0:
+                                return f"NUMBER({int(data_precision)})"
+                            else:
+                                return f"NUMBER({int(data_precision)},{int(data_scale)})"
+                        else:
+                            return data_type
+                    
+                    survey_id_type = build_type_string(survey_type_info)
+                    response_id_type = build_type_string(response_type_info)
+                    
+                    print(f"Using survey_id type: {survey_id_type}, response_id type: {response_id_type}")
+                    
+                except Exception as e:
+                    print(f"Warning: Could not determine exact column types from database, using Django model defaults: {e}")
+                    # Fall back to the standard UUID type that Django uses for Oracle
+                    survey_id_type = "RAW(16)" 
+                    response_id_type = "RAW(16)"
+                
+                # Create table for Oracle with exact matching types
+                cursor.execute(f"""
                     CREATE TABLE surveys_device_response (
                         id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                        survey_id RAW(16) NOT NULL,
+                        survey_id {survey_id_type} NOT NULL,
                         device_fingerprint VARCHAR2(64) NOT NULL,
                         ip_address VARCHAR2(45),
                         user_agent CLOB,
                         submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                        response_id RAW(16),
+                        response_id {response_id_type},
                         CONSTRAINT fk_device_response_survey 
                             FOREIGN KEY (survey_id) REFERENCES surveys_survey (id),
                         CONSTRAINT fk_device_response_response 
