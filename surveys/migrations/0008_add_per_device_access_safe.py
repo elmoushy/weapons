@@ -103,6 +103,8 @@ def create_device_response_table(apps, schema_editor):
                         data_type, data_length, data_precision, data_scale = type_info
                         if data_type == 'RAW' and data_length:
                             return f"RAW({int(data_length)})"
+                        elif data_type == 'VARCHAR2' and data_length:
+                            return f"VARCHAR2({int(data_length)})"
                         elif data_type == 'NUMBER':
                             if data_precision is None:
                                 return "NUMBER"
