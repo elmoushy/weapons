@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from .models import Group, UserGroup
+from weaponpowercloud_backend.security_utils import validate_and_sanitize_text_input, sanitize_html_input
 
 
 User = get_user_model()
@@ -158,6 +159,16 @@ class GroupSerializer(serializers.ModelSerializer):
             'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def validate_name(self, value):
+        """Validate and sanitize group name."""
+        return validate_and_sanitize_text_input(value, max_length=100, field_name="Group name")
+    
+    def validate_description(self, value):
+        """Validate and sanitize group description."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=500, field_name="Description")
 
 
 class GroupDetailSerializer(serializers.ModelSerializer):
@@ -292,13 +303,33 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         ]
     
     def validate_email(self, value):
-        """Validate email is unique."""
-        if User.objects.email_exists(value):
+        """Validate and sanitize email."""
+        # Sanitize the email input
+        cleaned_email = sanitize_html_input(value, allow_tags=False)
+        
+        if cleaned_email != value:
+            raise serializers.ValidationError("Invalid characters detected in email address.")
+        
+        if User.objects.email_exists(cleaned_email):
             raise serializers.ValidationError("A user with this email already exists.")
-        return value
+        return cleaned_email
+    
+    def validate_first_name(self, value):
+        """Validate and sanitize first name."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=30, field_name="First name")
+    
+    def validate_last_name(self, value):
+        """Validate and sanitize last name."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=30, field_name="Last name")
     
     def validate_password(self, value):
         """Validate password meets requirements."""
+        # Note: We don't sanitize passwords as they should remain exactly as entered
+        # But we do validate against Django's password validators
         try:
             validate_password(value)
         except ValidationError as e:
@@ -335,6 +366,16 @@ class UserLoginSerializer(serializers.Serializer):
     password = serializers.CharField(
         style={'input_type': 'password'}
     )
+    
+    def validate_email(self, value):
+        """Validate and sanitize email input."""
+        # Sanitize the email input to prevent XSS
+        cleaned_email = sanitize_html_input(value, allow_tags=False)
+        
+        if cleaned_email != value:
+            raise serializers.ValidationError("Invalid characters detected in email address.")
+        
+        return cleaned_email
     
     def validate(self, data):
         """Validate user credentials using Oracle-compatible method."""

@@ -9,6 +9,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Survey, Question, Response, Answer
 from .timezone_utils import serialize_datetime_uae, get_status_uae, is_currently_active_uae
+from weaponpowercloud_backend.security_utils import validate_and_sanitize_text_input, sanitize_html_input
 import json
 import logging
 
@@ -79,6 +80,10 @@ class QuestionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
+    def validate_text(self, value):
+        """Validate and sanitize question text."""
+        return validate_and_sanitize_text_input(value, max_length=500, field_name="Question text")
+    
     def validate(self, data):
         """Cross-field validation for questions"""
         question_type = data.get('question_type')
@@ -99,6 +104,20 @@ class QuestionSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         "Choice questions must have at least 2 options"
                     )
+                
+                # Sanitize each option
+                sanitized_options = []
+                for option in options_list:
+                    if isinstance(option, str):
+                        sanitized_option = validate_and_sanitize_text_input(
+                            option, max_length=200, field_name="Option"
+                        )
+                        sanitized_options.append(sanitized_option)
+                    else:
+                        sanitized_options.append(option)
+                
+                # Update the options with sanitized values
+                data['options'] = json.dumps(sanitized_options) if sanitized_options else data.get('options')
                     
             except (json.JSONDecodeError, TypeError):
                 raise serializers.ValidationError("Options must be valid JSON array")
@@ -107,12 +126,18 @@ class QuestionSerializer(serializers.ModelSerializer):
 
 
 class AnswerSerializer(serializers.ModelSerializer):
-    """Serializer for survey answers"""
+    """Serializer for survey answers with input sanitization"""
     
     class Meta:
         model = Answer
         fields = ['id', 'question', 'answer_text', 'created_at']
         read_only_fields = ['id', 'created_at']
+    
+    def validate_answer_text(self, value):
+        """Validate and sanitize answer text."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=2000, field_name="Answer")
 
 
 class ResponseSerializer(serializers.ModelSerializer):
@@ -200,6 +225,22 @@ class SurveySerializer(serializers.ModelSerializer):
     def get_can_be_edited(self, obj):
         """Check if survey can be edited (only drafts can be edited)"""
         return obj.can_be_edited()
+    
+    def validate_title(self, value):
+        """Validate and sanitize survey title."""
+        return validate_and_sanitize_text_input(value, max_length=255, field_name="Survey title")
+    
+    def validate_description(self, value):
+        """Validate and sanitize survey description."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=1000, field_name="Description")
+    
+    def validate_public_contact_method(self, value):
+        """Validate and sanitize public contact method."""
+        if not value:
+            return value
+        return validate_and_sanitize_text_input(value, max_length=255, field_name="Contact method")
     
     def validate(self, data):
         """Validate survey data including date logic"""

@@ -34,11 +34,9 @@ SECRET_KEY = os.getenv('SECRET_KEY', '6hyk-x9f#r!16lez2i+ek+@!x(4!k6x9y-$^1h69_@
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*'] if DEBUG else [
-    os.getenv('ALLOWED_HOST', 'localhost'),
-    '127.0.0.1',
-    'localhost',
-]
+ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else [
+    host.strip() for host in os.getenv('ALLOWED_HOST', 'localhost').split(',')
+] + ['127.0.0.1', 'localhost']
 
 
 # Application definition
@@ -57,9 +55,11 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_extensions',
     "django_filters",
+    # 'channels',  # WebSocket support - COMMENTED OUT FOR PRODUCTION
     # Local apps
     'authentication',
     'surveys',
+    'notifications',  # New app for real-time notifications
 ]
 
 # Custom User Model Configuration
@@ -67,7 +67,9 @@ AUTH_USER_MODEL = 'authentication.User'
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'csp.middleware.CSPMiddleware',  # Content Security Policy middleware
     'django.middleware.security.SecurityMiddleware',
+    'weaponpowercloud_backend.middleware.brute_force_protection.BruteForceProtectionMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -218,8 +220,8 @@ REST_FRAMEWORK = {
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),  # Access token expires after 8 hours
-    'REFRESH_TOKEN_LIFETIME': timedelta(hours=24),  # Refresh token expires after 24 hours
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # Reduced from 8 hours to 30 minutes
+    'REFRESH_TOKEN_LIFETIME': timedelta(hours=4),  # Reduced from 24 hours to 4 hours
     'ROTATE_REFRESH_TOKENS': True,  # Generate new refresh token on refresh
     'BLACKLIST_AFTER_ROTATION': False,  # Disabled for Oracle compatibility (no token_blacklist app)
     'UPDATE_LAST_LOGIN': True,  # Update user's last_login field on token refresh
@@ -264,8 +266,8 @@ CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 
 # Allow all origins setting from environment
 CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true'
 
-# Allow all origins in development (remove in production)
-if DEBUG:
+# Only allow all origins in development if explicitly set
+if DEBUG and os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true':
     CORS_ALLOW_ALL_ORIGINS = True
 
 # CORS headers that will be accepted
@@ -354,3 +356,84 @@ LOGGING = {
 
 # Create logs directory if it doesn't exist
 os.makedirs(BASE_DIR / 'logs', exist_ok=True)
+
+# Channels Configuration - COMMENTED OUT FOR PRODUCTION
+# ASGI_APPLICATION = 'weaponpowercloud_backend.asgi.application'
+
+# Redis Channel Layer Configuration - COMMENTED OUT FOR PRODUCTION
+# CHANNEL_LAYERS = {
+#     'default': {
+#         # Temporarily using in-memory backend for compatibility with Redis 3.2
+#         'BACKEND': 'channels.layers.InMemoryChannelLayer',
+#         # 'BACKEND': 'channels_redis.core.RedisChannelLayer',
+#         # 'CONFIG': {
+#         #     "hosts": [(os.getenv('REDIS_HOST', '127.0.0.1'), int(os.getenv('REDIS_PORT', 6379)))],
+#         #     "symmetric_encryption_keys": [SECRET_KEY[:32]],  # Use first 32 chars of SECRET_KEY
+#         #     "capacity": 1500,  # Maximum number of messages in a channel
+#         #     "expiry": 60,  # Message expiry time in seconds
+#         # },
+#     },
+# }
+
+# WebSocket Configuration - COMMENTED OUT FOR PRODUCTION
+# WEBSOCKET_URL = os.getenv('WEBSOCKET_URL', 'ws://localhost:8000/ws/')
+
+# Security Configuration
+# Brute Force Protection Settings
+MAX_LOGIN_ATTEMPTS = int(os.getenv('MAX_LOGIN_ATTEMPTS', '3'))
+LOCKOUT_DURATION_MINUTES = int(os.getenv('LOCKOUT_DURATION_MINUTES', '15'))
+RATE_LIMIT_DURATION_MINUTES = int(os.getenv('RATE_LIMIT_DURATION_MINUTES', '5'))
+
+# Security Headers
+X_FRAME_OPTIONS = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
+SECURE_BROWSER_XSS_FILTER = True
+
+# Content Security Policy - basic secure configuration
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = ("'self'",)
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")  # Allow inline styles for admin
+CSP_IMG_SRC = ("'self'", "data:", "https:")
+CSP_FONT_SRC = ("'self'", "https:")
+CSP_CONNECT_SRC = ("'self'",)
+CSP_FRAME_ANCESTORS = ("'none'",)  # Equivalent to X-Frame-Options: DENY
+
+# Additional Security Settings for Production
+if not DEBUG:
+    # Force HTTPS in production
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    
+    # Enhanced CSP for production
+    allowed_hosts = [host.strip() for host in os.getenv('ALLOWED_HOST', 'localhost').split(',')]
+    CSP_CONNECT_SRC = ("'self'",) + tuple(f"https://{host}" for host in allowed_hosts)
+    
+    # Additional production security
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+else:
+    # Development settings
+    CSP_SCRIPT_SRC = ("'self'", "'unsafe-inline'", "'unsafe-eval'")  # Allow for development
+    CSP_CONNECT_SRC = ("'self'", "http://localhost:*", "https://localhost:*")
+    CSP_CONNECT_SRC = ("'self'", "https:")
+
+# Input Sanitization Settings
+ALLOWED_HTML_TAGS = [
+    'p', 'br', 'strong', 'b', 'em', 'i', 'u', 
+    'ul', 'ol', 'li', 'blockquote'
+]
+
+ALLOWED_HTML_ATTRIBUTES = {
+    '*': ['class'],
+}
+
+# File Upload Security
+MAX_UPLOAD_SIZE = int(os.getenv('MAX_UPLOAD_SIZE', '10485760'))  # 10MB default
+ALLOWED_FILE_TYPES = [
+    'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
+    'application/pdf', 'text/plain', 'text/csv'
+]

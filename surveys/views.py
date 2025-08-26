@@ -42,6 +42,7 @@ from .timezone_utils import (
     format_uae_datetime, format_uae_date_only, get_status_uae, 
     is_currently_active_uae, serialize_datetime_uae
 )
+from notifications.services import SurveyNotificationService
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -587,6 +588,8 @@ class SurveyViewSet(ModelViewSet):
                     )
             
             old_visibility = survey.visibility
+            old_is_active = survey.is_active
+            old_status = survey.status
             
             # Handle access_level field mapping to visibility
             if 'access_level' in request.data:
@@ -613,8 +616,58 @@ class SurveyViewSet(ModelViewSet):
             
             # Handle public access token management based on visibility changes
             new_visibility = serializer.instance.visibility
+            new_is_active = serializer.instance.is_active
+            new_status = serializer.instance.status
             tokens_message = ""
             
+            # Check for survey activation/deactivation changes
+            if old_is_active != new_is_active:
+                if not old_is_active and new_is_active and new_status == 'submitted':
+                    # Survey was activated
+                    # Check if notifications should be sent (default: False to prevent spam)
+                    send_notifications = request.data.get('send_notifications', False)
+                    
+                    if send_notifications:
+                        try:
+                            # Use force_send=True when explicitly requested to send notifications
+                            force_send = survey.visibility in ['PUBLIC', 'AUTH']
+                            SurveyNotificationService.notify_users_of_new_survey(survey, request, force_send=force_send)
+                            logger.info(f"Sent survey activation notifications for survey {survey.id}")
+                            tokens_message += " Survey activation notifications sent."
+                        except Exception as e:
+                            logger.error(f"Failed to send survey activation notifications for survey {survey.id}: {e}")
+                    else:
+                        logger.info(f"Skipped sending activation notifications for survey {survey.id} as send_notifications was not requested")
+                        
+                elif old_is_active and not new_is_active:
+                    # Survey was deactivated
+                    try:
+                        SurveyNotificationService.notify_users_of_survey_deactivation(survey, user, request)
+                        logger.info(f"Sent survey deactivation notifications for survey {survey.id}")
+                        tokens_message += " Survey deactivation notifications sent."
+                    except Exception as e:
+                        logger.error(f"Failed to send survey deactivation notifications for survey {survey.id}: {e}")
+            
+            # Check for status changes (draft to submitted)
+            elif old_status == 'draft' and new_status == 'submitted' and new_is_active:
+                # Check if notifications should be sent (default: False to prevent spam)
+                send_notifications = request.data.get('send_notifications', False)
+                
+                if send_notifications:
+                    try:
+                        # Use force_send=True when explicitly requested to send notifications
+                        force_send = survey.visibility in ['PUBLIC', 'AUTH']
+                        SurveyNotificationService.notify_users_of_new_survey(survey, request, force_send=force_send)
+                        logger.info(f"Sent survey publication notifications for survey {survey.id}")
+                        tokens_message += " Survey publication notifications sent."
+                    except Exception as e:
+                        logger.error(f"Failed to send survey publication notifications for survey {survey.id}: {e}")
+                else:
+                    logger.info(f"Skipped sending notifications for survey {survey.id} as send_notifications was not requested")
+            
+            # Handle token management based on visibility changes
+            
+            # Handle visibility changes
             if old_visibility != new_visibility:
                 if old_visibility == 'PUBLIC':
                     # When changing FROM PUBLIC to any other visibility:
@@ -759,6 +812,128 @@ class SurveyViewSet(ModelViewSet):
             return uniform_response(
                 success=False,
                 message="Failed to delete survey",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsCreatorOrReadOnly])
+    def activate(self, request, pk=None):
+        """
+        Activate a survey - makes it available for responses.
+        
+        POST /api/surveys/{id}/activate/
+        """
+        try:
+            survey = self.get_object()
+            user = request.user
+            
+            # Check permissions
+            if user.role != 'super_admin' and survey.creator != user:
+                return uniform_response(
+                    success=False,
+                    message="You can only activate surveys you created",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Check if survey can be activated (must be submitted)
+            if survey.status != 'submitted':
+                return uniform_response(
+                    success=False,
+                    message="Only submitted surveys can be activated",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Survey is already active",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Activate the survey
+            old_is_active = survey.is_active
+            survey.is_active = True
+            survey.save()
+            
+            # Send notifications to eligible users if this wasn't already active
+            if not old_is_active:
+                # Check if notifications should be sent (default: False to prevent spam)
+                send_notifications = request.data.get('send_notifications', False)
+                
+                if send_notifications:
+                    try:
+                        # Use force_send=True when explicitly requested to send notifications
+                        force_send = survey.visibility in ['PUBLIC', 'AUTH']
+                        SurveyNotificationService.notify_users_of_new_survey(survey, request, force_send=force_send)
+                        logger.info(f"Sent survey activation notifications for survey {survey.id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send survey activation notifications for survey {survey.id}: {e}")
+                else:
+                    logger.info(f"Skipped sending activation notifications for survey {survey.id} as send_notifications was not requested")
+            
+            return uniform_response(
+                success=True,
+                message="Survey activated successfully",
+                data=SurveySerializer(survey, context={'request': request}).data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error activating survey: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to activate survey",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsCreatorOrReadOnly])
+    def deactivate(self, request, pk=None):
+        """
+        Deactivate a survey - stops accepting responses.
+        
+        POST /api/surveys/{id}/deactivate/
+        """
+        try:
+            survey = self.get_object()
+            user = request.user
+            
+            # Check permissions
+            if user.role != 'super_admin' and survey.creator != user:
+                return uniform_response(
+                    success=False,
+                    message="You can only deactivate surveys you created",
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+            
+            if not survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Survey is already inactive",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Deactivate the survey
+            old_is_active = survey.is_active
+            survey.is_active = False
+            survey.save()
+            
+            # Send notifications to users about deactivation
+            if old_is_active:
+                try:
+                    SurveyNotificationService.notify_users_of_survey_deactivation(survey, user, request)
+                    logger.info(f"Sent survey deactivation notifications for survey {survey.id}")
+                except Exception as e:
+                    logger.error(f"Failed to send survey deactivation notifications for survey {survey.id}: {e}")
+            
+            return uniform_response(
+                success=True,
+                message="Survey deactivated successfully",
+                data=SurveySerializer(survey, context={'request': request}).data
+            )
+            
+        except Exception as e:
+            logger.error(f"Error deactivating survey: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to deactivate survey",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -2192,6 +2367,79 @@ class SurveyViewSet(ModelViewSet):
             return uniform_response(
                 success=False,
                 message="Failed to share survey",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsCreatorOrReadOnly], url_path='send-notifications')
+    def send_notifications(self, request, pk=None):
+        """
+        Manually send notifications to users about this survey.
+        
+        POST /api/surveys/surveys/{survey_id}/send-notifications/
+        
+        Body:
+        {
+            "force_send": false  // Optional: Set to true to send to all users even for PUBLIC/AUTH surveys (default: false)
+        }
+        
+        This endpoint allows survey creators to manually send notifications after creating/updating surveys.
+        By default, it will not send notifications to all users for PUBLIC surveys to prevent spam.
+        Set force_send=true to override this safety check.
+        """
+        try:
+            survey = self.get_object()
+            
+            # Check if survey is in a state that can receive notifications
+            if survey.status != 'submitted' or not survey.is_active:
+                return uniform_response(
+                    success=False,
+                    message="Notifications can only be sent for active, submitted surveys",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get force_send parameter
+            force_send = request.data.get('force_send', False)
+            
+            try:
+                notifications = SurveyNotificationService.notify_users_of_new_survey(
+                    survey, request, force_send=force_send
+                )
+                
+                if notifications is None or len(notifications) == 0:
+                    if survey.visibility == 'PUBLIC' and not force_send:
+                        message = "Notifications not sent to prevent spam to all users. Use force_send=true to override."
+                    elif survey.visibility == 'AUTH' and not force_send:
+                        message = "Notifications not sent to prevent spam to all authenticated users. Use force_send=true to override."
+                    else:
+                        message = "No eligible users to notify for this survey."
+                else:
+                    message = f"Successfully sent {len(notifications)} notifications."
+                
+                logger.info(f"Manual notification sending for survey {survey.id} by {request.user.email}: {message}")
+                
+                return uniform_response(
+                    success=True,
+                    message=message,
+                    data={
+                        'notifications_sent': len(notifications) if notifications else 0,
+                        'survey_visibility': survey.visibility,
+                        'force_send_used': force_send
+                    }
+                )
+                
+            except Exception as e:
+                logger.error(f"Failed to send notifications for survey {survey.id}: {e}")
+                return uniform_response(
+                    success=False,
+                    message="Failed to send notifications",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in send_notifications for survey {pk}: {e}")
+            return uniform_response(
+                success=False,
+                message="Failed to process notification request",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -6234,6 +6482,21 @@ class SurveySubmitView(APIView):
             
             # Submit the survey
             survey.submit()
+            
+            # Send notifications to eligible users about the new survey
+            # Check if notifications should be sent (default: False to prevent spam)
+            send_notifications = request.data.get('send_notifications', False)
+            
+            if send_notifications:
+                try:
+                    # Use force_send=True when explicitly requested to send notifications
+                    force_send = survey.visibility in ['PUBLIC', 'AUTH']
+                    SurveyNotificationService.notify_users_of_new_survey(survey, request, force_send=force_send)
+                    logger.info(f"Sent survey availability notifications for survey {survey.id}")
+                except Exception as e:
+                    logger.error(f"Failed to send survey availability notifications for survey {survey.id}: {e}")
+            else:
+                logger.info(f"Skipped sending survey availability notifications for survey {survey.id} as send_notifications was not requested")
             
             # Serialize the updated survey with proper context
             serializer = SurveySerializer(survey, context={'request': request})

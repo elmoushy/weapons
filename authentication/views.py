@@ -27,6 +27,10 @@ from .permissions import (
     CanViewGroup, CanManageGroupUsers, CanAccessUserData
 )
 from .dual_auth import UniversalAuthentication
+from weaponpowercloud_backend.security_utils import log_security_event
+from weaponpowercloud_backend.middleware.brute_force_protection import (
+    clear_login_attempts, get_remaining_attempts
+)
 
 
 User = get_user_model()
@@ -1084,9 +1088,19 @@ class LoginView(APIView):
     API endpoint for user login with email/password.
     
     This endpoint authenticates users with email/password and returns JWT tokens.
+    Includes brute force protection.
     """
     
     permission_classes = [AllowAny]
+    
+    def get_client_ip(self, request):
+        """Get client IP address."""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0]
+        else:
+            ip = request.META.get('REMOTE_ADDR')
+        return ip
     
     def post(self, request):
         """
@@ -1096,6 +1110,12 @@ class LoginView(APIView):
             User information and JWT tokens
         """
         try:
+            email = request.data.get('email', '')
+            ip_address = self.get_client_ip(request)
+            
+            # Check remaining attempts before processing
+            remaining_attempts = get_remaining_attempts(email=email, ip=ip_address)
+            
             serializer = UserLoginSerializer(data=request.data)
             if serializer.is_valid():
                 user = serializer.validated_data['user']
@@ -1117,6 +1137,17 @@ class LoginView(APIView):
                         # Continue without saving last_login to avoid breaking login
                         pass
                     
+                    # Clear login attempts on successful login
+                    clear_login_attempts(email=user.email, ip=ip_address)
+                    
+                    # Log successful login
+                    log_security_event(
+                        event_type='successful_login',
+                        user=user,
+                        request=request,
+                        details={'login_method': 'email_password'}
+                    )
+                    
                     logger.info(f"User logged in: {user.email}")
                     
                     return Response({
@@ -1136,15 +1167,30 @@ class LoginView(APIView):
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
             else:
-                return Response({
+                # Log failed login attempt
+                log_security_event(
+                    event_type='failed_login_validation',
+                    request=request,
+                    details={
+                        'email': email,
+                        'remaining_attempts': remaining_attempts,
+                        'errors': serializer.errors
+                    }
+                )
+                
+                response_data = {
                     'errors': serializer.errors
-                }, status=status.HTTP_400_BAD_REQUEST)
+                }
+                
+                # Add remaining attempts info if rate limiting is in effect
+                if remaining_attempts <= 3:  # Show warning when attempts are low
+                    response_data['remaining_attempts'] = remaining_attempts
+                    response_data['warning'] = f'You have {remaining_attempts} login attempts remaining.'
+                
+                return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
                 
         except Exception as e:
             logger.error(f"Error during user login: {str(e)}")
-            return Response({
-                'detail': 'Login failed due to server error'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             return Response({
                 'detail': 'Login failed due to server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

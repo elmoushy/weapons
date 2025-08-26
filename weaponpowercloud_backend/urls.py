@@ -31,6 +31,7 @@ def api_root(request):
         'endpoints': {
             'authentication': '/api/auth/',
             'surveys': '/api/surveys/',
+            'notifications': '/api/notifications/',
             'admin': '/admin/',
             'api_docs': '/api/' if settings.DEBUG else None,
         },
@@ -50,6 +51,9 @@ urlpatterns = [
     
     # Survey service endpoints
     path('api/surveys/', include('surveys.urls')),
+    
+    # Notifications endpoints
+    path('api/notifications/', include('notifications.urls')),
     
     # Add your other app URLs here
     # path('api/weapons/', include('weapons.urls')),
