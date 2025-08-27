@@ -4724,7 +4724,7 @@ class QuestionAnalyticsDashboardView(APIView):
         }
         
         # Parse start date
-        start_str = request.query_params.get('start')
+        start_str = safe_get_query_params(request, 'start')
         if start_str:
             try:
                 params['start'] = parse_datetime(start_str)
@@ -4732,7 +4732,7 @@ class QuestionAnalyticsDashboardView(APIView):
                 pass
         
         # Parse end date
-        end_str = request.query_params.get('end')
+        end_str = safe_get_query_params(request, 'end')
         if end_str:
             try:
                 params['end'] = parse_datetime(end_str)
@@ -4740,7 +4740,7 @@ class QuestionAnalyticsDashboardView(APIView):
                 pass
         
         # Parse include_personal
-        include_personal = request.query_params.get('include_personal', 'false').lower()
+        include_personal = safe_get_query_params(request, 'include_personal', 'false').lower()
         params['include_personal'] = include_personal in ['true', '1', 'yes']
         
         return params
@@ -5142,7 +5142,7 @@ class SurveyQuestionsAnalyticsView(APIView):
         }
         
         # Parse start date
-        start = request.query_params.get('start')
+        start = safe_get_query_params(request, 'start')
         if start:
             try:
                 params['start'] = parse_datetime(start)
@@ -5150,7 +5150,7 @@ class SurveyQuestionsAnalyticsView(APIView):
                 pass
         
         # Parse end date
-        end = request.query_params.get('end')
+        end = safe_get_query_params(request, 'end')
         if end:
             try:
                 params['end'] = parse_datetime(end)
@@ -5158,7 +5158,7 @@ class SurveyQuestionsAnalyticsView(APIView):
                 pass
         
         # Parse timezone
-        tz = request.query_params.get('tz', 'Asia/Dubai')
+        tz = safe_get_query_params(request, 'tz', 'Asia/Dubai')
         try:
             pytz.timezone(tz)
             params['tz'] = tz
@@ -5166,7 +5166,7 @@ class SurveyQuestionsAnalyticsView(APIView):
             pass
         
         # Parse include_personal
-        include_personal = request.query_params.get('include_personal', 'false').lower()
+        include_personal = safe_get_query_params(request, 'include_personal', 'false').lower()
         params['include_personal'] = include_personal in ['true', '1', 'yes']
         
         return params
@@ -5444,8 +5444,8 @@ class AdminResponsesView(generics.ListAPIView):
         ).prefetch_related('answers__question')
         
         # Date range filtering
-        start_date = self.request.query_params.get('start_date')
-        end_date = self.request.query_params.get('end_date')
+        start_date = safe_get_query_params(self.request, 'start_date')
+        end_date = safe_get_query_params(self.request, 'end_date')
         
         if start_date:
             try:
@@ -5475,7 +5475,7 @@ class AdminResponsesView(generics.ListAPIView):
                 )
             
             # Handle export requests
-            export_format = request.query_params.get('export')
+            export_format = safe_get_query_params(request, 'export')
             if export_format in ['csv', 'json']:
                 return self._export_responses(export_format)
             
