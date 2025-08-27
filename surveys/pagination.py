@@ -46,3 +46,31 @@ class SurveyPagination(PageNumberPagination):
                 }
             }
         })
+
+
+class ResponsePagination(PageNumberPagination):
+    """
+    Custom pagination for survey responses with configurable page size.
+    Default per_page is 10, can be customized via 'per_page' query parameter.
+    """
+    page_size = 10
+    page_size_query_param = 'per_page'
+    max_page_size = 100
+    
+    def get_paginated_response(self, data):
+        response_data = {
+            'status': 'success',
+            'message': 'Survey responses retrieved successfully',
+            'data': {
+                'count': self.page.paginator.count,
+                'total_pages': self.page.paginator.num_pages,
+                'current_page': self.page.number,
+                'per_page': self.get_page_size(self.request),
+                'next': self.get_next_link(),
+                'previous': self.get_previous_link(),
+                'results': data
+            }
+        }
+        
+        # Add survey context if available in the view's list method
+        return Response(response_data)

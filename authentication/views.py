@@ -19,7 +19,8 @@ from .serializers import (
     UserSerializer, UserProfileSerializer, GroupSerializer, 
     GroupDetailSerializer, CreateGroupSerializer, AddUserToGroupSerializer,
     UpdateUserGroupSerializer, UserGroupSerializer,
-    UserRegistrationSerializer, UserLoginSerializer, ChangePasswordSerializer
+    UserRegistrationSerializer, UserLoginSerializer, ChangePasswordSerializer,
+    BulkDeleteUsersSerializer, ResetUserPasswordSerializer
 )
 from .models import Group, UserGroup
 from .permissions import (
@@ -1438,4 +1439,218 @@ class CustomTokenRefreshView(APIView):
             logger.error(f"Unexpected error during token refresh: {str(e)}")
             return Response({
                 'detail': 'Token refresh failed due to server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class BulkDeleteUsersView(APIView):
+    """
+    API endpoint to bulk delete users.
+    
+    Only admins and super admins can delete users.
+    Users cannot delete themselves.
+    Surveys created by deleted users are preserved.
+    """
+    
+    authentication_classes = [UniversalAuthentication]
+    permission_classes = [IsAdminOrSuperAdmin]
+    
+    def post(self, request):
+        """
+        Delete multiple users in bulk.
+        
+        Args:
+            request: HTTP request with user_ids in the body
+            
+        Returns:
+            Summary of deletion results
+        """
+        try:
+            from .serializers import BulkDeleteUsersSerializer
+            
+            serializer = BulkDeleteUsersSerializer(
+                data=request.data, 
+                context={'request': request}
+            )
+            
+            if not serializer.is_valid():
+                return Response({
+                    'detail': 'Invalid data provided',
+                    'errors': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            user_ids = serializer.validated_data['user_ids']
+            
+            # Track results
+            successful_deletions = []
+            failed_deletions = []
+            
+            with transaction.atomic():
+                for user_id in user_ids:
+                    try:
+                        # Get user
+                        user = User.objects.get(id=user_id)
+                        
+                        # Check if user exists and gather info before deletion
+                        user_info = {
+                            'id': user.id,
+                            'email': user.email,
+                            'username': user.username,
+                            'role': user.role
+                        }
+                        
+                        # Check if this is a protected super admin
+                        if user.role == 'super_admin':
+                            # Count remaining super admins
+                            super_admin_count = User.objects.filter(
+                                role='super_admin',
+                                is_active=True
+                            ).exclude(id=user.id).count()
+                            
+                            if super_admin_count < 1:
+                                failed_deletions.append({
+                                    'user_id': user_id,
+                                    'email': user.email,
+                                    'error': 'Cannot delete the last super admin account'
+                                })
+                                continue
+                        
+                        # Delete the user (surveys will be preserved due to SET_NULL)
+                        user.delete()
+                        
+                        successful_deletions.append(user_info)
+                        
+                        # Log the deletion
+                        log_security_event(
+                            event_type='user_deletion',
+                            user=request.user,
+                            details={
+                                'deleted_user_id': user_id,
+                                'deleted_user_email': user_info['email'],
+                                'deleted_user_role': user_info['role']
+                            }
+                        )
+                        
+                        logger.info(f"User deleted by admin {request.user.email}: {user_info['email']}")
+                        
+                    except User.DoesNotExist:
+                        failed_deletions.append({
+                            'user_id': user_id,
+                            'email': 'Unknown',
+                            'error': 'User does not exist'
+                        })
+                        
+                    except Exception as e:
+                        failed_deletions.append({
+                            'user_id': user_id,
+                            'email': 'Unknown',
+                            'error': f'Unexpected error: {str(e)}'
+                        })
+            
+            # Prepare response
+            response_data = {
+                'message': 'Bulk user deletion completed',
+                'summary': {
+                    'total_requested': len(user_ids),
+                    'successful_deletions': len(successful_deletions),
+                    'failed_deletions': len(failed_deletions)
+                },
+                'results': {
+                    'successful': successful_deletions,
+                    'failed': failed_deletions
+                }
+            }
+            
+            # Determine response status
+            if len(successful_deletions) > 0 and len(failed_deletions) == 0:
+                response_status = status.HTTP_200_OK
+            elif len(successful_deletions) > 0 and len(failed_deletions) > 0:
+                response_status = status.HTTP_207_MULTI_STATUS
+            else:
+                response_status = status.HTTP_400_BAD_REQUEST
+                response_data['message'] = 'No users were deleted'
+            
+            return Response(response_data, status=response_status)
+            
+        except Exception as e:
+            logger.error(f"Error in bulk user deletion: {str(e)}")
+            return Response({
+                'detail': 'An unexpected error occurred during user deletion'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ResetUserPasswordView(APIView):
+    """
+    API endpoint to reset a user's password by admin.
+    
+    Only admins and super admins can reset user passwords.
+    Only works for regular authentication users (not Azure AD).
+    """
+    
+    authentication_classes = [UniversalAuthentication]
+    permission_classes = [IsAdminOrSuperAdmin]
+    
+    def post(self, request):
+        """
+        Reset a user's password.
+        
+        Args:
+            request: HTTP request with user_id and new_password
+            
+        Returns:
+            Confirmation of password reset
+        """
+        try:
+            from .serializers import ResetUserPasswordSerializer
+            
+            serializer = ResetUserPasswordSerializer(
+                data=request.data,
+                context={'request': request}
+            )
+            
+            if not serializer.is_valid():
+                return Response({
+                    'detail': 'Invalid data provided',
+                    'errors': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            user_id = serializer.validated_data['user_id']
+            new_password = serializer.validated_data['new_password']
+            
+            # Get the user
+            user = User.objects.get(id=user_id)
+            
+            # Set the new password (automatically hashes it)
+            user.set_password(new_password)
+            user.save()
+            
+            # Log the password reset
+            log_security_event(
+                event_type='password_reset_by_admin',
+                user=request.user,
+                details={
+                    'target_user_id': user_id,
+                    'target_user_email': user.email
+                }
+            )
+            
+            logger.info(f"Password reset by admin {request.user.email} for user: {user.email}")
+            
+            return Response({
+                'message': 'Password reset successfully',
+                'user': {
+                    'id': user.id,
+                    'email': user.email,
+                    'username': user.username
+                }
+            }, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            return Response({
+                'detail': 'User not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+            
+        except Exception as e:
+            logger.error(f"Error resetting user password: {str(e)}")
+            return Response({
+                'detail': 'An unexpected error occurred during password reset'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

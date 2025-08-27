@@ -164,7 +164,9 @@ class Survey(models.Model):
     # Ownership and sharing
     creator = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="created_surveys",
         help_text='User who created this survey'
     )
@@ -717,7 +719,9 @@ class PublicAccessToken(models.Model):
     )
     created_by = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="created_tokens",
         help_text='User who created this token'
     )

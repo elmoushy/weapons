@@ -463,3 +463,76 @@ class ChangePasswordSerializer(serializers.Serializer):
         user.set_password(self.validated_data['new_password'])
         user.save()
         return user
+
+
+class BulkDeleteUsersSerializer(serializers.Serializer):
+    """
+    Serializer for bulk user deletion request.
+    """
+    user_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        min_length=1,
+        help_text='List of user IDs to delete'
+    )
+    
+    def validate_user_ids(self, value):
+        """Validate that user IDs exist and are not the current user."""
+        if not value:
+            raise serializers.ValidationError("At least one user ID must be provided.")
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_ids = []
+        for user_id in value:
+            if user_id not in seen:
+                seen.add(user_id)
+                unique_ids.append(user_id)
+        
+        # Check if current user is trying to delete themselves
+        current_user_id = self.context['request'].user.id
+        if current_user_id in unique_ids:
+            raise serializers.ValidationError("You cannot delete your own account.")
+        
+        return unique_ids
+
+
+class ResetUserPasswordSerializer(serializers.Serializer):
+    """
+    Serializer for resetting a user's password by admin.
+    """
+    user_id = serializers.IntegerField(
+        min_value=1,
+        help_text='ID of the user whose password to reset'
+    )
+    new_password = serializers.CharField(
+        min_length=8,
+        max_length=128,
+        style={'input_type': 'password'},
+        help_text='New password for the user'
+    )
+    
+    def validate_new_password(self, value):
+        """Validate the new password."""
+        try:
+            validate_password(value)
+        except ValidationError as e:
+            raise serializers.ValidationError(e.messages)
+        return value
+    
+    def validate_user_id(self, value):
+        """Validate that user exists and is not the current user."""
+        try:
+            user = User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User with this ID does not exist.")
+        
+        # Check if user is trying to reset their own password
+        current_user_id = self.context['request'].user.id
+        if current_user_id == value:
+            raise serializers.ValidationError("Use the change password endpoint to change your own password.")
+        
+        # Check if user is a regular auth user
+        if user.auth_type != 'regular':
+            raise serializers.ValidationError("Password reset not allowed for Azure AD users.")
+        
+        return value

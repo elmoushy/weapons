@@ -267,11 +267,43 @@ class SurveySerializer(serializers.ModelSerializer):
                     'id': data['id'],
                     'title': data['title'],
                     'description': data['description'],
-                    'questions': data['questions']
+                    'questions': data['questions'],
+                    'response_count': data['response_count'],
+                    'creator_email': data['creator_email'],
+                    'created_at': data['created_at']
                 }
             return {}
         
         user = request.user
+        
+        # Handle orphaned surveys (creator is None) - super admins can manage them
+        if instance.creator is None:
+            if user.role == 'super_admin':
+                return data  # Super admins see all fields for orphaned surveys
+            elif user.role in ['admin', 'manager']:
+                # Admins see limited fields for orphaned surveys
+                return {
+                    'id': data['id'],
+                    'title': data['title'],
+                    'description': data['description'],
+                    'questions': data['questions'],
+                    'response_count': data['response_count'],
+                    'creator_email': data['creator_email'],
+                    'created_at': data['created_at']
+                }
+            else:
+                # Regular users see minimal fields for orphaned public surveys
+                if instance.visibility == 'PUBLIC':
+                    return {
+                        'id': data['id'],
+                        'title': data['title'],
+                        'description': data['description'],
+                        'questions': data['questions'],
+                        'response_count': data['response_count'],
+                        'creator_email': data['creator_email'],
+                        'created_at': data['created_at']
+                    }
+                return {}
         
         # Creators see everything
         if user == instance.creator:
@@ -288,6 +320,7 @@ class SurveySerializer(serializers.ModelSerializer):
                 'title': data['title'],
                 'description': data['description'],
                 'questions': data['questions'],
+                'response_count': data['response_count'],
                 'creator_email': data['creator_email'],
                 'created_at': data['created_at']
             }

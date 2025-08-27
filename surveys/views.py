@@ -29,7 +29,7 @@ from dateutil.parser import parse as parse_datetime
 import pytz
 
 from .models import Survey, Question, Response as SurveyResponse, Answer, PublicAccessToken
-from .pagination import SurveyPagination
+from .pagination import SurveyPagination, ResponsePagination
 from .serializers import (
     SurveySerializer, QuestionSerializer, ResponseSerializer,
     SurveySubmissionSerializer, ResponseSubmissionSerializer
@@ -59,6 +59,90 @@ def safe_get_query_params(request, key, default=None):
             return request.GET.get(key, default)
     except Exception:
         return default
+
+
+def can_user_manage_survey(user, survey):
+    """
+    Check if a user can manage (update/delete) a survey.
+    
+    Rules:
+    - Super admin can manage any survey (including orphaned ones)
+    - Admin/Manager can manage surveys they created AND orphaned surveys
+    - Regular users can only manage surveys they created
+    - If survey.creator is None (orphaned), super admin/admin/manager can manage it
+    """
+    if user.role == 'super_admin':
+        return True
+    
+    # If survey is orphaned (creator deleted), admin and manager can manage it
+    if survey.creator is None:
+        return user.role in ['admin', 'manager']
+    
+    # For all roles, they can manage their own surveys
+    return survey.creator == user
+
+
+def can_user_access_survey(user, survey):
+    """
+    Check if a user can access (view/respond to) a survey.
+    
+    Rules:
+    - Super admin can access any survey
+    - Admin/Manager can access any survey (including orphaned ones)
+    - Regular users follow normal visibility rules + orphaned surveys are accessible to admins/managers
+    """
+    if user.role in ['super_admin', 'admin', 'manager']:
+        return True
+    
+    # Normal visibility rules for regular users
+    if survey.visibility == 'PUBLIC':
+        return True
+    elif survey.visibility == 'AUTH':
+        return True  # Any authenticated user
+    elif survey.visibility == 'PRIVATE':
+        # Check if user is the creator or in shared_with list
+        return (survey.creator == user or 
+                user in survey.shared_with.all())
+    elif survey.visibility == 'GROUPS':
+        # Check if user is in any of the shared groups
+        user_groups = user.user_groups.all()
+        shared_groups = survey.shared_with_groups.all()
+        return any(ug.group in shared_groups for ug in user_groups)
+    
+    return False
+
+
+def can_user_access_survey(user, survey):
+    """
+    Check if a user can access (view/respond to) a survey.
+    
+    Rules:
+    - Super admin can access any survey (including orphaned ones)
+    - Admin can access any survey
+    - Users can access surveys they created (even if orphaned - they still have access to data)
+    - Users can access surveys based on visibility rules
+    """
+    if user.role in ['super_admin', 'admin']:
+        return True
+    
+    # Check if user created the survey (even if creator is now null, they still have access to their data)
+    # This is checked through other relationships like responses
+    if survey.creator == user:
+        return True
+    
+    # For orphaned surveys, regular users can only access based on visibility
+    # Check visibility rules
+    if survey.visibility == 'PUBLIC':
+        return True
+    elif survey.visibility == 'AUTH':
+        return True  # Any authenticated user
+    elif survey.visibility == 'PRIVATE':
+        return survey.shared_with.filter(id=user.id).exists()
+    elif survey.visibility == 'GROUPS':
+        user_groups = user.user_groups.values_list('group_id', flat=True)
+        return survey.shared_with_groups.filter(id__in=user_groups).exists()
+    
+    return False
 
 
 def get_arabic_status_message(survey):
@@ -386,6 +470,19 @@ class SurveyViewSet(ModelViewSet):
     ordering_fields = ['created_at', 'updated_at', 'title', 'response_count']
     ordering = ['-created_at']
     
+    @classmethod
+    def get_oracle_safe_fields(cls):
+        """
+        Get the list of fields safe to use with distinct() in Oracle.
+        Excludes NCLOB fields (EncryptedTextField) to prevent ORA-00932 error.
+        """
+        return [
+            'id', 'title_hash', 'creator', 'visibility', 
+            'start_date', 'end_date', 'is_locked', 'is_active', 
+            'public_contact_method', 'per_device_access', 'status',
+            'created_at', 'updated_at'
+        ]
+    
     def get_object(self):
         """
         Override get_object to handle cases where request doesn't have query_params.
@@ -423,14 +520,14 @@ class SurveyViewSet(ModelViewSet):
                             (Q(shared_with_groups__in=user_groups) & Q(status='submitted')) |  # Group shared (submitted only)
                             (Q(visibility='PUBLIC') & Q(status='submitted')) |  # Public surveys (submitted only)
                             (Q(visibility='AUTH') & Q(status='submitted'))  # Auth surveys (submitted only)
-                        ).distinct().defer('description')
+                        ).distinct().only(*self.get_oracle_safe_fields())
                     except Exception:
                         # Fallback to basic access if user_groups fails
                         base_queryset = self.queryset.filter(
                             Q(creator=user) |
                             (Q(visibility='PUBLIC') & Q(status='submitted')) |
                             (Q(visibility='AUTH') & Q(status='submitted'))
-                        ).distinct().defer('description')
+                        ).distinct().only(*self.get_oracle_safe_fields())
                 
                 return base_queryset.get(pk=pk)
             else:
@@ -453,14 +550,14 @@ class SurveyViewSet(ModelViewSet):
         else:
             # Regular users see their own surveys (including drafts), shared surveys (submitted only), public/auth surveys (submitted only), and group-shared surveys (submitted only)
             user_groups = user.user_groups.values_list('group', flat=True)
-            # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+            # Oracle fix: use only() to exclude NCLOB fields when using distinct() to avoid ORA-00932 error
             base_queryset = self.queryset.filter(
                 Q(creator=user) |  # Own surveys (including drafts)
                 (Q(shared_with=user) & Q(status='submitted')) |  # Shared surveys (submitted only)
                 (Q(shared_with_groups__in=user_groups) & Q(status='submitted')) |  # Group shared (submitted only)
                 (Q(visibility='PUBLIC') & Q(status='submitted')) |  # Public surveys (submitted only)
                 (Q(visibility='AUTH') & Q(status='submitted'))  # Auth surveys (submitted only)
-            ).distinct().defer('description')
+            ).distinct().only(*SurveyViewSet.get_oracle_safe_fields())
         
         # Apply additional filters
         queryset = self._apply_custom_filters(base_queryset)
@@ -630,25 +727,12 @@ class SurveyViewSet(ModelViewSet):
                     )
             
             # Check if user can update the survey
-            if user.role == 'super_admin':
-                # Super admin can update any survey
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only update their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only update surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only update their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only update surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only update surveys you created" + (" (orphaned surveys can be managed by admin/manager/super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             old_visibility = survey.visibility
             old_is_active = survey.is_active
@@ -870,25 +954,12 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check if user can delete the survey
-            if user.role == 'super_admin':
-                # Super admin can delete any survey
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only delete their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only delete surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only delete their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only delete surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only delete surveys you created" + (" (orphaned surveys can be managed by admin/manager/super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             # Perform soft delete
             survey.soft_delete()
@@ -921,10 +992,10 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check permissions
-            if user.role != 'super_admin' and survey.creator != user:
+            if not can_user_manage_survey(user, survey):
                 return uniform_response(
                     success=False,
-                    message="You can only activate surveys you created",
+                    message="You can only activate surveys you created" + (" (orphaned surveys can be managed by admin/manager/super admin)" if survey.creator is None else ""),
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             
@@ -990,10 +1061,10 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check permissions
-            if user.role != 'super_admin' and survey.creator != user:
+            if not can_user_manage_survey(user, survey):
                 return uniform_response(
                     success=False,
-                    message="You can only deactivate surveys you created",
+                    message="You can only deactivate surveys you created" + (" (orphaned surveys can be managed by admin/manager/super admin)" if survey.creator is None else ""),
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             
@@ -1047,25 +1118,12 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check if user can modify the survey audience
-            if user.role == 'super_admin':
-                # Super admin can modify any survey
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only modify their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only modify surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only modify their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only modify surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only modify surveys you created" + (" (orphaned surveys can be managed by admin/manager/super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             old_visibility = survey.visibility
             
@@ -1236,25 +1294,13 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check if user can add questions to the survey
-            if user.role == 'super_admin':
-                # Super admin can add questions to any survey
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only add questions to their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only add questions to surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only add questions to their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only add questions to surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            # Check if user can add questions to the survey
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only add questions to surveys you created" + (" (orphaned surveys can only be managed by super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             if survey.is_locked:
                 return uniform_response(
@@ -1312,25 +1358,12 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check if user can update the question
-            if user.role == 'super_admin':
-                # Super admin can update any question
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only update questions from their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only update questions from surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only update questions from their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only update questions from surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only update questions from surveys you created" + (" (orphaned surveys can only be managed by super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             if survey.is_locked:
                 return uniform_response(
@@ -1387,25 +1420,12 @@ class SurveyViewSet(ModelViewSet):
             user = request.user
             
             # Check if user can delete the question
-            if user.role == 'super_admin':
-                # Super admin can delete any question
-                pass
-            elif user.role in ['admin', 'manager']:
-                # Admin/Manager can only delete questions from their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only delete questions from surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
-            else:
-                # Regular users can only delete questions from their own surveys
-                if survey.creator != user:
-                    return uniform_response(
-                        success=False,
-                        message="You can only delete questions from surveys you created",
-                        status_code=status.HTTP_403_FORBIDDEN
-                    )
+            if not can_user_manage_survey(user, survey):
+                return uniform_response(
+                    success=False,
+                    message="You can only delete questions from surveys you created" + (" (orphaned surveys can only be managed by super admin)" if survey.creator is None else ""),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
             
             if survey.is_locked:
                 return uniform_response(
@@ -1949,7 +1969,7 @@ class SurveyViewSet(ModelViewSet):
             # 1. User is authenticated AND (is creator OR survey is public/auth)
             # 2. Survey is public (for unauthenticated users)
             if request.user.is_authenticated:
-                if not (survey.creator == request.user or survey.visibility in ['PUBLIC', 'AUTH'] or request.user.role in ['super_admin', 'admin']):
+                if not can_user_access_survey(request.user, survey):
                     return uniform_response(
                         success=False,
                         message="You don't have permission to access this survey's links.",
@@ -3135,6 +3155,19 @@ class MySharedSurveysView(generics.ListAPIView):
     ordering_fields = ['created_at', 'updated_at', 'title']
     ordering = ['-updated_at']
     
+    @classmethod
+    def get_oracle_safe_fields(cls):
+        """
+        Get the list of fields safe to use with distinct() in Oracle.
+        Excludes NCLOB fields (EncryptedTextField) to prevent ORA-00932 error.
+        """
+        return [
+            'id', 'title_hash', 'creator', 'visibility', 
+            'start_date', 'end_date', 'is_locked', 'is_active', 
+            'public_contact_method', 'per_device_access', 'status',
+            'created_at', 'updated_at'
+        ]
+    
     def get_queryset(self):
         """Get surveys shared with the authenticated user"""
         user = self.request.user
@@ -3174,13 +3207,13 @@ class MySharedSurveysView(generics.ListAPIView):
                 logger.warning(f"Could not query user groups for {user.email}: {e}")
             
             # Build the final queryset with minimal prefetch to avoid table issues
-            # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+            # Oracle fix: use only() to exclude NCLOB fields when using distinct() to avoid ORA-00932 error
             queryset = Survey.objects.filter(
                 base_query,
                 deleted_at__isnull=True,
                 is_active=True,  # Only show active surveys
                 status='submitted'  # Only show submitted surveys, exclude drafts
-            ).distinct().select_related('creator').defer('description')
+            ).distinct().select_related('creator').only(*self.get_oracle_safe_fields())
             
             # Try to add prefetch_related safely
             try:
@@ -3203,12 +3236,12 @@ class MySharedSurveysView(generics.ListAPIView):
             logger.error(f"Error building survey queryset for {user.email}: {e}")
             # Fallback to minimal safe query
             try:
-                # Oracle fix: defer NCLOB fields when using distinct() to avoid ORA-00932 error
+                # Oracle fix: use only() to exclude NCLOB fields when using distinct() to avoid ORA-00932 error
                 return Survey.objects.filter(
                     Q(visibility='PUBLIC') | Q(visibility='AUTH'),
                     deleted_at__isnull=True,
                     is_active=True
-                ).distinct().select_related('creator').defer('description')
+                ).distinct().select_related('creator').only(*self.get_oracle_safe_fields())
             except Exception as fallback_error:
                 logger.error(f"Even fallback query failed for {user.email}: {fallback_error}")
                 # Return empty queryset to prevent 500 errors
@@ -3261,9 +3294,13 @@ class MySharedSurveysView(generics.ListAPIView):
                     'created_at': serialize_datetime_uae(survey.created_at),
                     'updated_at': serialize_datetime_uae(survey.updated_at),
                     'creator': {
-                        'id': survey.creator.id,
-                        'email': survey.creator.email,
-                        'name': survey.creator.full_name
+                        'id': survey.creator.id if survey.creator else None,
+                        'email': survey.creator.email if survey.creator else 'Deleted User',
+                        'name': survey.creator.full_name if survey.creator else 'Deleted User'
+                    } if survey.creator else {
+                        'id': None,
+                        'email': 'Deleted User',
+                        'name': 'Deleted User'
                     },
                     'questions_count': survey.questions.count(),
                     'estimated_time': max(survey.questions.count() * 1, 5),
@@ -3273,7 +3310,7 @@ class MySharedSurveysView(generics.ListAPIView):
                         'has_submitted': has_submitted,
                         'is_shared_explicitly': survey.visibility == 'PRIVATE',
                         'is_shared_via_group': survey.visibility == 'GROUPS',
-                        'is_creator': survey.creator == request.user
+                        'is_creator': survey.creator == request.user if survey.creator is not None else False
                     }
                 }
                 
@@ -5633,6 +5670,7 @@ class AdminSurveyResponsesView(generics.ListAPIView):
     
     serializer_class = ResponseSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = ResponsePagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['is_complete', 'respondent']
     ordering_fields = ['submitted_at']
@@ -5684,7 +5722,15 @@ class AdminSurveyResponsesView(generics.ListAPIView):
                 )
             
             queryset = self.filter_queryset(self.get_queryset())
-            page = self.paginate_queryset(queryset)
+            
+            # Check if pagination parameters are provided
+            page_param = request.query_params.get('page')
+            per_page_param = request.query_params.get('per_page')
+            
+            # Only paginate if pagination parameters are provided
+            page = None
+            if page_param is not None or per_page_param is not None:
+                page = self.paginate_queryset(queryset)
             
             # Prepare detailed response data
             response_data = []
@@ -5749,23 +5795,24 @@ class AdminSurveyResponsesView(generics.ListAPIView):
                 'visibility': survey.visibility,
                 'is_active': survey.is_active,
                 'created_at': survey.created_at.isoformat(),
-                'creator_email': survey.creator.email,
+                'creator_email': survey.creator.email if survey.creator else 'هذا الشخص لم يعد متاح',
                 'total_questions': survey.questions.count(),
                 'total_responses': survey.responses.count()
             }
             
             if page is not None:
-                # Return paginated response
-                paginated_data = self.get_paginated_response(response_data)
-                paginated_data.data['survey'] = survey_context
-                return paginated_data
+                # Return paginated response with survey context
+                paginated_response = self.get_paginated_response(response_data)
+                paginated_response.data['data']['survey'] = survey_context
+                return paginated_response
             
+            # Return all data without pagination
             return uniform_response(
                 success=True,
                 message="Survey responses retrieved successfully",
                 data={
                     'survey': survey_context,
-                    'responses': response_data,
+                    'results': response_data,
                     'total_count': queryset.count()
                 }
             )
@@ -5848,7 +5895,7 @@ class TokenSurveysView(APIView):
                 'visibility': survey.visibility,
                 'is_active': survey.is_active,
                 'created_at': survey.created_at.isoformat(),
-                'creator_email': survey.creator.email,
+                'creator_email': survey.creator.email if survey.creator else 'Deleted User',
                 'access_permissions': {
                     'can_submit': True,
                     'can_view_results': False,
@@ -5965,7 +6012,7 @@ class TokenSurveyDetailView(APIView):
                 'questions_count': survey.questions.count(),
                 'created_at': survey.created_at.isoformat(),
                 'updated_at': survey.updated_at.isoformat(),
-                'creator_email': survey.creator.email,
+                'creator_email': survey.creator.email if survey.creator else 'Deleted User',
                 'questions': question_serializer.data,
                 'access_info': {
                     'access_type': 'token',
@@ -6248,7 +6295,7 @@ class PasswordProtectedSurveyView(APIView):
                 'questions_count': survey.questions.count(),
                 'created_at': survey.created_at.isoformat(),
                 'updated_at': survey.updated_at.isoformat(),
-                'creator_email': survey.creator.email,
+                'creator_email': survey.creator.email if survey.creator else 'Deleted User',
                 'questions': question_serializer.data,
                 'access_info': {
                     'access_type': 'password_token',
@@ -6593,10 +6640,10 @@ class SurveySubmitView(APIView):
             
             # Check permissions
             user = request.user
-            if user.role != 'super_admin' and survey.creator != user:
+            if not can_user_manage_survey(user, survey):
                 return uniform_response(
                     success=False,
-                    message="You can only submit surveys you created",
+                    message="You can only submit surveys you created" + (" (orphaned surveys can only be managed by super admin)" if survey.creator is None else ""),
                     status_code=status.HTTP_403_FORBIDDEN
                 )
             

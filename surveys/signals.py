@@ -222,7 +222,7 @@ def survey_response_completed_notification(sender, instance, created, **kwargs):
         # Get respondent information
         if response.respondent:
             respondent_name = (
-                response.respondent.get_full_name() or 
+                response.respondent.full_name or 
                 response.respondent.username or 
                 response.respondent.email
             )
@@ -239,20 +239,28 @@ def survey_response_completed_notification(sender, instance, created, **kwargs):
         
         # Send notification to survey creator
         try:
-            NotificationService.create_survey_completed_notification(
-                recipient=survey.creator,
-                survey_title=survey.title,
-                respondent_name=respondent_name,
-                survey_id=str(survey.id),
-                survey_url=survey_url
-            )
-            logger.info(
-                f"Sent survey completed notification to {survey.creator.email} "
-                f"for response {response.id} to survey {survey.id}"
-            )
+            # Only send notification if the creator still exists
+            if survey.creator:
+                NotificationService.create_survey_completed_notification(
+                    recipient=survey.creator,
+                    survey_title=survey.title,
+                    respondent_name=respondent_name,
+                    survey_id=str(survey.id),
+                    survey_url=survey_url
+                )
+                logger.info(
+                    f"Sent survey completed notification to {survey.creator.email} "
+                    f"for response {response.id} to survey {survey.id}"
+                )
+            else:
+                logger.info(
+                    f"Skipped survey completed notification for deleted user "
+                    f"for response {response.id} to survey {survey.id}"
+                )
         except Exception as e:
+            creator_email = survey.creator.email if survey.creator else 'Deleted User'
             logger.error(
-                f"Failed to send survey completed notification to {survey.creator.email} "
+                f"Failed to send survey completed notification to {creator_email} "
                 f"for response {response.id} to survey {survey.id}: {str(e)}"
             )
         

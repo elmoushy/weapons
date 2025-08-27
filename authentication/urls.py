@@ -40,6 +40,8 @@ urlpatterns = [
     path('logout/', views.logout, name='logout'),
     path('users/', views.AllUsersView.as_view(), name='all-users'),
     path('users/search/', views.UserSearchView.as_view(), name='user-search'),
+    path('users/bulk-delete/', views.BulkDeleteUsersView.as_view(), name='bulk-delete-users'),
+    path('users/reset-password/', views.ResetUserPasswordView.as_view(), name='reset-user-password'),
     path('users/<int:user_id>/role/', views.UserRoleUpdateView.as_view(), name='user-role-update'),
     path('users/<int:user_id>/groups/', views.UserGroupsView.as_view(), name='user-groups'),
     

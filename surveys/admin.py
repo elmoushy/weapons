@@ -6,7 +6,25 @@ responses, and answers with proper encryption handling.
 """
 
 from django.contrib import admin
-from .models import Survey, Question, Response, Answer
+from .models import Survey, Question, Response, Answer, PublicAccessToken
+
+
+class OrphanedSurveyFilter(admin.SimpleListFilter):
+    """Custom filter for orphaned surveys (creator is null)"""
+    title = 'Survey Status'
+    parameter_name = 'survey_status'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('orphaned', 'Orphaned (Creator Deleted)'),
+            ('active', 'Has Creator'),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == 'orphaned':
+            return queryset.filter(creator__isnull=True)
+        elif self.value() == 'active':
+            return queryset.filter(creator__isnull=False)
 
 
 @admin.register(Survey)
@@ -14,10 +32,10 @@ class SurveyAdmin(admin.ModelAdmin):
     """Admin interface for Survey model"""
     
     list_display = [
-        'title', 'creator', 'visibility', 'is_active', 
+        'title', 'creator_display', 'visibility', 'is_active', 
         'is_locked', 'response_count', 'created_at'
     ]
-    list_filter = ['visibility', 'is_active', 'is_locked', 'created_at']
+    list_filter = ['visibility', 'is_active', 'is_locked', 'created_at', OrphanedSurveyFilter]
     search_fields = ['title', 'description', 'creator__email']
     readonly_fields = ['id', 'title_hash', 'created_at', 'updated_at']
     filter_horizontal = ['shared_with']
@@ -37,6 +55,14 @@ class SurveyAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+    
+    def creator_display(self, obj):
+        """Display creator or 'Deleted User' for orphaned surveys"""
+        if obj.creator:
+            return obj.creator.email
+        return 'Deleted User (Orphaned Survey)'
+    creator_display.short_description = 'Creator'
+    creator_display.admin_order_field = 'creator__email'
     
     def response_count(self, obj):
         """Get response count for survey"""
@@ -147,3 +173,42 @@ class AnswerAdmin(admin.ModelAdmin):
         """Show preview of answer text"""
         return obj.answer_text[:50] + "..." if len(obj.answer_text) > 50 else obj.answer_text
     answer_preview.short_description = 'Answer'
+
+
+@admin.register(PublicAccessToken)
+class PublicAccessTokenAdmin(admin.ModelAdmin):
+    """Admin interface for PublicAccessToken model"""
+    
+    list_display = [
+        'token', 'survey_title', 'created_by_display', 
+        'is_active', 'expires_at', 'created_at'
+    ]
+    list_filter = ['is_active', 'created_at', 'expires_at']
+    search_fields = ['survey__title', 'token', 'created_by__email']
+    readonly_fields = ['id', 'token', 'created_at']
+    
+    fieldsets = (
+        ('Token Details', {
+            'fields': ('id', 'token', 'survey', 'created_by', 'is_active')
+        }),
+        ('Access Control', {
+            'fields': ('password', 'restricted_email', 'restricted_phone')
+        }),
+        ('Timing', {
+            'fields': ('expires_at', 'created_at')
+        }),
+    )
+    
+    def survey_title(self, obj):
+        """Show survey title"""
+        return obj.survey.title
+    survey_title.short_description = 'Survey'
+    survey_title.admin_order_field = 'survey__title'
+    
+    def created_by_display(self, obj):
+        """Display created_by or 'Deleted User' for orphaned tokens"""
+        if obj.created_by:
+            return obj.created_by.email
+        return 'Deleted User'
+    created_by_display.short_description = 'Created By'
+    created_by_display.admin_order_field = 'created_by__email'
