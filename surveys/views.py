@@ -48,6 +48,19 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
+def safe_get_query_params(request, key, default=None):
+    """
+    Safely get query parameters from either DRF request.query_params or Django request.GET
+    """
+    try:
+        if hasattr(request, 'query_params'):
+            return request.query_params.get(key, default)
+        else:
+            return request.GET.get(key, default)
+    except Exception:
+        return default
+
+
 def get_arabic_status_message(survey):
     """
     Generate Arabic status messages with proper date and time formatting for surveys in UAE timezone
@@ -373,6 +386,56 @@ class SurveyViewSet(ModelViewSet):
     ordering_fields = ['created_at', 'updated_at', 'title', 'response_count']
     ordering = ['-created_at']
     
+    def get_object(self):
+        """
+        Override get_object to handle cases where request doesn't have query_params.
+        This can happen when the request is not properly wrapped by DRF.
+        """
+        try:
+            # Try the standard DRF approach first
+            return super().get_object()
+        except AttributeError as e:
+            if "'WSGIRequest' object has no attribute 'query_params'" in str(e):
+                # Fallback: get object directly by primary key without filters
+                pk = self.kwargs.get(self.lookup_field)
+                if not pk:
+                    raise
+                
+                # Apply the same base queryset logic as get_queryset but without filters
+                user = getattr(self.request, 'user', None)
+                
+                if not user or not user.is_authenticated:
+                    # Anonymous users only see submitted public surveys
+                    base_queryset = self.queryset.filter(visibility='PUBLIC', is_active=True, status='submitted')
+                elif user.role == 'super_admin':
+                    # Super admin sees all surveys
+                    base_queryset = self.queryset
+                elif user.role in ['admin', 'manager']:
+                    # Admin/Manager see only their own surveys
+                    base_queryset = self.queryset.filter(creator=user)
+                else:
+                    # Regular users see their own surveys, shared surveys, public/auth surveys, and group-shared surveys
+                    try:
+                        user_groups = user.user_groups.values_list('group', flat=True)
+                        base_queryset = self.queryset.filter(
+                            Q(creator=user) |  # Own surveys (including drafts)
+                            (Q(shared_with=user) & Q(status='submitted')) |  # Shared surveys (submitted only)
+                            (Q(shared_with_groups__in=user_groups) & Q(status='submitted')) |  # Group shared (submitted only)
+                            (Q(visibility='PUBLIC') & Q(status='submitted')) |  # Public surveys (submitted only)
+                            (Q(visibility='AUTH') & Q(status='submitted'))  # Auth surveys (submitted only)
+                        ).distinct().defer('description')
+                    except Exception:
+                        # Fallback to basic access if user_groups fails
+                        base_queryset = self.queryset.filter(
+                            Q(creator=user) |
+                            (Q(visibility='PUBLIC') & Q(status='submitted')) |
+                            (Q(visibility='AUTH') & Q(status='submitted'))
+                        ).distinct().defer('description')
+                
+                return base_queryset.get(pk=pk)
+            else:
+                raise
+    
     def get_queryset(self):
         """Filter surveys based on user permissions with enhanced filtering"""
         user = self.request.user
@@ -409,7 +472,7 @@ class SurveyViewSet(ModelViewSet):
     
     def _apply_custom_filters(self, queryset):
         """Apply custom filters for survey status"""
-        survey_status_filter = self.request.query_params.get('survey_status')
+        survey_status_filter = safe_get_query_params(self.request, 'survey_status')
         
         if survey_status_filter:
             if survey_status_filter == 'active':
@@ -433,7 +496,7 @@ class SurveyViewSet(ModelViewSet):
     
     def _apply_custom_ordering(self, queryset):
         """Apply custom ordering based on Arabic filter options"""
-        sort_by = self.request.query_params.get('sort_by')
+        sort_by = safe_get_query_params(self.request, 'sort_by')
         
         if sort_by:
             if sort_by == 'newest':
@@ -499,12 +562,12 @@ class SurveyViewSet(ModelViewSet):
     def _get_applied_filters_info(self):
         """Get information about currently applied filters"""
         filters_info = {
-            'search': self.request.query_params.get('search', ''),
-            'survey_status': self.request.query_params.get('survey_status', 'all'),
-            'sort_by': self.request.query_params.get('sort_by', 'newest'),
-            'visibility': self.request.query_params.get('visibility', ''),
-            'is_active': self.request.query_params.get('is_active', ''),
-            'status': self.request.query_params.get('status', ''),
+            'search': safe_get_query_params(self.request, 'search', ''),
+            'survey_status': safe_get_query_params(self.request, 'survey_status', 'all'),
+            'sort_by': safe_get_query_params(self.request, 'sort_by', 'newest'),
+            'visibility': safe_get_query_params(self.request, 'visibility', ''),
+            'is_active': safe_get_query_params(self.request, 'is_active', ''),
+            'status': safe_get_query_params(self.request, 'status', ''),
         }
         return filters_info
     
@@ -726,34 +789,65 @@ class SurveyViewSet(ModelViewSet):
     
     def retrieve(self, request, *args, **kwargs):
         """Retrieve survey with visibility check"""
+        survey_id = kwargs.get('pk')
         try:
             # Check for valid survey ID
-            survey_id = kwargs.get('pk')
             if not survey_id or survey_id == 'undefined' or survey_id == 'null':
+                logger.warning(f"Invalid survey ID provided: {survey_id}")
                 return uniform_response(
                     success=False,
                     message="Survey ID is required and cannot be undefined",
                     status_code=status.HTTP_400_BAD_REQUEST
                 )
             
-            survey = self.get_object()
-            
-            # Check access permissions
-            if not IsCreatorOrVisible().has_object_permission(request, self, survey):
+            try:
+                survey = self.get_object()
+                logger.info(f"Successfully retrieved survey {survey_id}: {survey.title}")
+            except Exception as get_obj_error:
+                logger.error(f"Error getting survey object {survey_id}: {get_obj_error}")
                 return uniform_response(
                     success=False,
-                    message="Access denied",
-                    status_code=status.HTTP_403_FORBIDDEN
+                    message="Error accessing survey",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
             
-            serializer = self.get_serializer(survey)
-            return uniform_response(
-                success=True,
-                message="Survey retrieved successfully",
-                data=serializer.data
-            )
+            # Check access permissions
+            try:
+                if not IsCreatorOrVisible().has_object_permission(request, self, survey):
+                    logger.warning(f"Access denied to survey {survey_id} for user {request.user}")
+                    return uniform_response(
+                        success=False,
+                        message="Access denied",
+                        status_code=status.HTTP_403_FORBIDDEN
+                    )
+            except Exception as perm_error:
+                logger.error(f"Error checking permissions for survey {survey_id}: {perm_error}")
+                return uniform_response(
+                    success=False,
+                    message="Permission check failed",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            try:
+                serializer = self.get_serializer(survey)
+                logger.info(f"Successfully serialized survey {survey_id}")
+                return uniform_response(
+                    success=True,
+                    message="Survey retrieved successfully",
+                    data=serializer.data
+                )
+            except Exception as serialize_error:
+                logger.error(f"Error serializing survey {survey_id}: {serialize_error}")
+                return uniform_response(
+                    success=False,
+                    message="Error preparing survey data",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
         except Exception as e:
-            logger.error(f"Error retrieving survey: {e}")
+            logger.error(f"Unexpected error retrieving survey {survey_id}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return uniform_response(
                 success=False,
                 message="Survey not found",
@@ -1355,8 +1449,8 @@ class SurveyViewSet(ModelViewSet):
         """
         try:
             survey = self.get_object()
-            export_format = request.query_params.get('format', 'csv').lower()
-            include_personal = request.query_params.get('include_personal_data', 'false').lower() == 'true'
+            export_format = safe_get_query_params(request, 'format', 'csv').lower()
+            include_personal = safe_get_query_params(request, 'include_personal_data', 'false').lower() == 'true'
             
             if export_format not in ['csv', 'json']:
                 return uniform_response(
@@ -1983,7 +2077,7 @@ class SurveyViewSet(ModelViewSet):
                     status_code=status.HTTP_404_NOT_FOUND
                 )
             
-            token = request.query_params.get('token')
+            token = safe_get_query_params(request, 'token')
             
             # Check if survey is submitted (not draft) - draft surveys should not be publicly accessible
             if survey.status != 'submitted':
@@ -2119,7 +2213,7 @@ class SurveyViewSet(ModelViewSet):
         GET /api/surveys/surveys/access/?token={token}
         """
         try:
-            token = request.query_params.get('token')
+            token = safe_get_query_params(request, 'token')
             
             if not token:
                 return uniform_response(
@@ -2532,7 +2626,7 @@ class SurveyViewSet(ModelViewSet):
         }
         
         # Parse start_date
-        start_date_str = request.query_params.get('start_date')
+        start_date_str = safe_get_query_params(request, 'start_date')
         if start_date_str:
             try:
                 params['start_date'] = parse_datetime(start_date_str)
@@ -2540,7 +2634,7 @@ class SurveyViewSet(ModelViewSet):
                 pass
         
         # Parse end_date
-        end_date_str = request.query_params.get('end_date')
+        end_date_str = safe_get_query_params(request, 'end_date')
         if end_date_str:
             try:
                 params['end_date'] = parse_datetime(end_date_str)
@@ -2548,7 +2642,7 @@ class SurveyViewSet(ModelViewSet):
                 pass
         
         # Parse include_demographics
-        include_demographics = request.query_params.get('include_demographics', 'false').lower()
+        include_demographics = safe_get_query_params(request, 'include_demographics', 'false').lower()
         params['include_demographics'] = include_demographics in ['true', '1', 'yes']
         
         return params
@@ -3228,7 +3322,7 @@ class UserSearchView(generics.ListAPIView):
         GET /api/users/search/?query={search_term}
         """
         try:
-            query = request.query_params.get('query', '').strip()
+            query = safe_get_query_params(request, 'query', '').strip()
             
             if not query or len(query) < 2:
                 return uniform_response(
@@ -3779,7 +3873,7 @@ class SurveySubmissionView(APIView):
     def _user_can_access(self, request, survey):
         """Check if user can access survey for submission"""
         # Check for public token access first
-        token = request.data.get('token') or request.query_params.get('token')
+        token = request.data.get('token') or safe_get_query_params(request, 'token')
         if token:
             try:
                 access_token = PublicAccessToken.objects.get(
@@ -4083,10 +4177,23 @@ class SurveyAnalyticsDashboardView(APIView):
                 return survey
             
             # Parse query parameters
-            params = self._parse_query_params(request)
+            try:
+                params = self._parse_query_params(request)
+                logger.info(f"Successfully parsed query parameters for survey {survey_id}")
+            except Exception as parse_error:
+                logger.error(f"Error parsing query parameters for survey {survey_id}: {parse_error}")
+                # Use default parameters if parsing fails
+                params = {
+                    'start': None,
+                    'end': None,
+                    'tz': 'Asia/Dubai',
+                    'group_by': 'day',
+                    'include_personal': False
+                }
             
             # Get filtered responses with optimized prefetch
             responses = self._get_filtered_responses(survey, params)
+            logger.info(f"Retrieved {responses.count()} responses for survey {survey_id} analytics")
             
             # Build dashboard data
             dashboard_data = {
@@ -4098,6 +4205,7 @@ class SurveyAnalyticsDashboardView(APIView):
                 'export': self._get_export_links(survey, params['include_personal'])
             }
             
+            logger.info(f"Successfully generated analytics dashboard for survey {survey_id}")
             return uniform_response(
                 success=True,
                 message="Survey analytics retrieved successfully",
@@ -4116,7 +4224,9 @@ class SurveyAnalyticsDashboardView(APIView):
         """Get survey and check permissions"""
         try:
             survey = Survey.objects.get(id=survey_id, deleted_at__isnull=True)
+            logger.info(f"Found survey {survey_id}: {survey.title}")
         except Survey.DoesNotExist:
+            logger.warning(f"Survey {survey_id} not found")
             return uniform_response(
                 success=False,
                 message="Survey not found",
@@ -4125,58 +4235,76 @@ class SurveyAnalyticsDashboardView(APIView):
         
         user = request.user
         if not (user.role in ['admin', 'super_admin'] or user == survey.creator):
+            logger.warning(f"Access denied to survey {survey_id} for user {user.id} (role: {user.role})")
             return uniform_response(
                 success=False,
                 message="Access denied. Only admins, super admins, or survey creators can view analytics.",
                 status_code=status.HTTP_403_FORBIDDEN
             )
         
+        logger.info(f"Analytics access granted to user {user.id} (role: {user.role}) for survey {survey_id}")
         return survey
     
     def _parse_query_params(self, request):
         """Parse and validate query parameters"""
-        params = {
-            'start': None,
-            'end': None,
-            'tz': 'Asia/Dubai',
-            'group_by': 'day',
-            'include_personal': False
-        }
-        
-        # Parse start date
-        start_str = request.query_params.get('start')
-        if start_str:
-            try:
-                params['start'] = parse_datetime(start_str)
-            except (ValueError, TypeError):
-                pass
-        
-        # Parse end date
-        end_str = request.query_params.get('end')
-        if end_str:
-            try:
-                params['end'] = parse_datetime(end_str)
-            except (ValueError, TypeError):
-                pass
-        
-        # Parse timezone
-        tz_str = request.query_params.get('tz', 'Asia/Dubai')
         try:
-            pytz.timezone(tz_str)  # Validate timezone
-            params['tz'] = tz_str
-        except pytz.exceptions.UnknownTimeZoneError:
-            params['tz'] = 'Asia/Dubai'
-        
-        # Parse group_by
-        group_by = request.query_params.get('group_by', 'day').lower()
-        if group_by in ['day', 'week', 'month']:
-            params['group_by'] = group_by
-        
-        # Parse include_personal
-        include_personal = request.query_params.get('include_personal', 'false').lower()
-        params['include_personal'] = include_personal in ['true', '1', 'yes']
-        
-        return params
+            params = {
+                'start': None,
+                'end': None,
+                'tz': 'Asia/Dubai',
+                'group_by': 'day',
+                'include_personal': False
+            }
+            
+            # Parse start date
+            start_str = safe_get_query_params(request, 'start')
+            if start_str:
+                try:
+                    params['start'] = parse_datetime(start_str)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid start date format '{start_str}': {e}")
+            
+            # Parse end date
+            end_str = safe_get_query_params(request, 'end')
+            if end_str:
+                try:
+                    params['end'] = parse_datetime(end_str)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid end date format '{end_str}': {e}")
+            
+            # Parse timezone
+            tz_str = safe_get_query_params(request, 'tz', 'Asia/Dubai')
+            try:
+                pytz.timezone(tz_str)  # Validate timezone
+                params['tz'] = tz_str
+            except pytz.exceptions.UnknownTimeZoneError as e:
+                logger.warning(f"Invalid timezone '{tz_str}': {e}, using default 'Asia/Dubai'")
+                params['tz'] = 'Asia/Dubai'
+            
+            # Parse group_by
+            group_by = safe_get_query_params(request, 'group_by', 'day').lower()
+            if group_by in ['day', 'week', 'month']:
+                params['group_by'] = group_by
+            else:
+                logger.warning(f"Invalid group_by value '{group_by}', using default 'day'")
+                params['group_by'] = 'day'
+            
+            # Parse include_personal
+            include_personal = safe_get_query_params(request, 'include_personal', 'false').lower()
+            params['include_personal'] = include_personal in ['true', '1', 'yes']
+            
+            return params
+            
+        except Exception as e:
+            logger.error(f"Error parsing query parameters: {e}")
+            # Return default parameters on any error
+            return {
+                'start': None,
+                'end': None,
+                'tz': 'Asia/Dubai',
+                'group_by': 'day',
+                'include_personal': False
+            }
     
     def _get_filtered_responses(self, survey, params):
         """Get responses with date filtering and optimization"""
