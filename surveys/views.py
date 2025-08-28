@@ -508,8 +508,8 @@ class SurveyViewSet(ModelViewSet):
                     # Super admin sees all surveys
                     base_queryset = self.queryset
                 elif user.role in ['admin', 'manager']:
-                    # Admin/Manager see only their own surveys
-                    base_queryset = self.queryset.filter(creator=user)
+                    # Admin/Manager can see all surveys
+                    base_queryset = self.queryset
                 else:
                     # Regular users see their own surveys, shared surveys, public/auth surveys, and group-shared surveys
                     try:
@@ -545,8 +545,8 @@ class SurveyViewSet(ModelViewSet):
             # Super admin sees all surveys
             base_queryset = self.queryset
         elif user.role in ['admin', 'manager']:
-            # Admin/Manager see only their own surveys
-            base_queryset = self.queryset.filter(creator=user)
+            # Admin/Manager can see all surveys
+            base_queryset = self.queryset
         else:
             # Regular users see their own surveys (including drafts), shared surveys (submitted only), public/auth surveys (submitted only), and group-shared surveys (submitted only)
             user_groups = user.user_groups.values_list('group', flat=True)
@@ -2406,12 +2406,21 @@ class SurveyViewSet(ModelViewSet):
             )
             
         except Survey.DoesNotExist:
+            logger.warning(f"Survey {pk} not found for user {request.user.email}")
             return uniform_response(
                 success=False,
                 message=get_arabic_error_messages()['survey_not_found'],
                 status_code=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
+            # Check if the exception message contains "No Survey matches"
+            if "No Survey matches the given query" in str(e) or "DoesNotExist" in str(type(e).__name__):
+                logger.warning(f"Survey {pk} not found or no access for user {request.user.email}: {e}")
+                return uniform_response(
+                    success=False,
+                    message=get_arabic_error_messages()['survey_not_found'],
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
             logger.error(f"Error accessing survey {pk} for user {request.user.email}: {e}")
             return uniform_response(
                 success=False,

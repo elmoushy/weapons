@@ -57,3 +57,55 @@ INFO 2025-08-28 00:05:00,952 dual_auth 24064 8632 User seif778811@gmail.com auth
 INFO 2025-08-28 00:06:38,713 dual_auth 24064 8632 User seif778811@gmail.com authenticated with regular JWT (universal)
 INFO 2025-08-28 00:06:39,032 views 24064 8632 Successfully retrieved survey 8ac2f925-98f0-41f4-bd12-f0ddc6016725: استطلاع الممسوح
 INFO 2025-08-28 00:06:39,033 views 24064 8632 Successfully serialized survey 8ac2f925-98f0-41f4-bd12-f0ddc6016725
+ERROR 2025-08-28 00:12:09,088 encryption 22432 25076 No encryption key found in production
+WARNING 2025-08-28 00:12:09,088 encryption 22432 25076 Surveys encryption not initialized - key not found
+ERROR 2025-08-28 00:12:10,005 encryption 2348 5252 No encryption key found in production
+WARNING 2025-08-28 00:12:10,005 encryption 2348 5252 Surveys encryption not initialized - key not found
+INFO 2025-08-28 00:15:45,956 serializers 7412 3988 Looking for user with email: seif778811@gmail.com
+INFO 2025-08-28 00:15:48,436 serializers 7412 3988 User found: seif778811@gmail.com (super_admin)
+INFO 2025-08-28 00:15:48,436 serializers 7412 3988 Authenticating with username: seif778811@gmail.com
+INFO 2025-08-28 00:15:50,510 serializers 7412 3988 Authentication result: seif778811@gmail.com (super_admin)
+INFO 2025-08-28 00:15:50,511 serializers 7412 3988 Validation successful
+INFO 2025-08-28 00:15:51,246 views 7412 3988 User logged in: seif778811@gmail.com
+INFO 2025-08-28 00:15:53,931 dual_auth 7412 3988 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:15:53,931 views 7412 3988 Building queryset for user seif778811@gmail.com
+INFO 2025-08-28 00:15:54,042 views 7412 3988 Successfully built queryset for user seif778811@gmail.com
+INFO 2025-08-28 00:16:46,285 dual_auth 7412 11372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:16:46,395 dual_auth 7412 19372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:17:05,309 dual_auth 7412 19372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:17:09,000 dual_auth 7412 19372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:17:09,208 views 7412 19372 Found survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85: mmx
+INFO 2025-08-28 00:17:09,210 views 7412 19372 Analytics access granted to user 1 (role: super_admin) for survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85
+INFO 2025-08-28 00:17:09,210 views 7412 19372 Successfully parsed query parameters for survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85
+INFO 2025-08-28 00:17:09,285 views 7412 19372 Retrieved 1 responses for survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85 analytics
+INFO 2025-08-28 00:17:16,262 views 7412 19372 Successfully generated analytics dashboard for survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85
+INFO 2025-08-28 00:17:17,191 dual_auth 7412 19372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:17:17,393 views 7412 19372 Successfully retrieved survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85: mmx
+INFO 2025-08-28 00:17:17,404 views 7412 19372 Successfully serialized survey 7dd38a4f-358b-484e-bc83-d1d1c808ce85
+INFO 2025-08-28 00:17:51,496 dual_auth 7412 19372 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:18:37,640 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:19:40,562 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:19:44,879 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:20:36,315 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:20:43,219 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:21:12,122 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:21:32,706 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:22:46,119 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:22:57,338 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:25:02,320 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:25:10,262 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:25:16,919 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:25:32,422 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 00:26:08,772 dual_auth 7412 6204 User seif778811@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 07:00:05,258 serializers 22072 17208 Looking for user with email: seifelmoushy78@gmail.com
+INFO 2025-08-28 07:00:08,076 serializers 22072 17208 User found: seifelmoushy78@gmail.com (admin)
+INFO 2025-08-28 07:00:08,076 serializers 22072 17208 Authenticating with username: seifelmoushy78@gmail.com
+INFO 2025-08-28 07:00:09,030 serializers 22072 17208 Authentication result: seifelmoushy78@gmail.com (admin)
+INFO 2025-08-28 07:00:09,030 serializers 22072 17208 Validation successful
+INFO 2025-08-28 07:00:09,453 views 22072 17208 User logged in: seifelmoushy78@gmail.com
+INFO 2025-08-28 07:00:10,999 dual_auth 22072 17208 User seifelmoushy78@gmail.com authenticated with regular JWT (universal)
+INFO 2025-08-28 07:00:11,000 views 22072 17208 Building queryset for user seifelmoushy78@gmail.com
+INFO 2025-08-28 07:00:11,090 views 22072 17208 Successfully built queryset for user seifelmoushy78@gmail.com
+INFO 2025-08-28 07:00:22,670 dual_auth 22072 17208 User seifelmoushy78@gmail.com authenticated with regular JWT (universal)
+ERROR 2025-08-28 07:00:22,820 views 22072 17208 Error accessing survey 114fc584-8590-4659-be32-48ffaa030479 for user seifelmoushy78@gmail.com: No Survey matches the given query.
+INFO 2025-08-28 07:05:52,439 dual_auth 13472 13644 User seifelmoushy78@gmail.com authenticated with regular JWT (universal)
