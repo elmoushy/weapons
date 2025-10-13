@@ -85,6 +85,7 @@ jobs:
           POSTGRES_DB: test_db
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
+          CI: true
         ports:
           - 5432:5432
         options: >-
@@ -131,12 +132,6 @@ jobs:
           echo "DATABASE_URL=postgres://postgres:postgres@localhost:5432/test_db" >> .env
           echo "SURVEYS_ENCRYPTION_KEY=${{ secrets.SURVEYS_ENCRYPTION_KEY }}" >> .env
           echo "REDIS_HOST=localhost" >> .env
-
-      - name: Run migrations
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_db
-          SURVEYS_ENCRYPTION_KEY: ${{ secrets.SURVEYS_ENCRYPTION_KEY }}
-        run: python manage.py migrate --noinput
 
       - name: Run tests
         run: python manage.py test
