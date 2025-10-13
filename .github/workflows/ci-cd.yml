@@ -121,7 +121,10 @@ jobs:
           echo "CORS_ALLOWED_ORIGINS=http://localhost" >> .env
           echo "REDIS_HOST=localhost" >> .env
       - name: Run migrations
+        env:
+          SURVEYS_ENCRYPTION_KEY: ${{ secrets.SURVEYS_ENCRYPTION_KEY }}
         run: python manage.py migrate
+
       - name: Run tests
         run: python manage.py test
 
