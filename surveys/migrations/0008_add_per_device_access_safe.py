@@ -6,24 +6,17 @@ import uuid
 
 
 def check_column_exists(table_name, column_name):
-    """Check if a column exists in a table."""
-    with connection.cursor() as cursor:
-        if connection.vendor == 'oracle':
-            cursor.execute("""
-                SELECT COUNT(*) 
-                FROM user_tab_columns 
-                WHERE table_name = UPPER(%s) 
-                AND column_name = UPPER(%s)
-            """, [table_name, column_name])
-        else:
-            cursor.execute("""
-                SELECT COUNT(*) 
-                FROM information_schema.columns 
-                WHERE table_name = %s 
-                AND column_name = %s
-            """, [table_name, column_name])
-        
-        return cursor.fetchone()[0] > 0
+    from django.db import connection
+    cursor = connection.cursor()
+    # Skip check for SQLite since it doesn't have information_schema
+    if connection.vendor == "sqlite":
+        return False
+    cursor.execute("""
+                   SELECT COUNT(*) FROM information_schema.columns
+                   WHERE table_name = %s AND column_name = %s
+                   """, [table_name, column_name])
+    return cursor.fetchone()[0] > 0
+
 
 
 def check_table_exists(table_name):
