@@ -41,7 +41,7 @@ oracledb==3.3.0  # Oracle database driver
 # New packages for news service
 django-filter>=24.0.0  # For advanced filtering
 pillow-heif>=0.10.0  # For HEIF image support
-pillow-simd>=9.0.0  # Faster image processing (optional)
+pillow>=9.0.0  # Faster image processing (optional)
 
 # Security packages
 bleach==6.2.0  # HTML sanitization to prevent XSS
