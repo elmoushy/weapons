@@ -35,12 +35,10 @@ venv.bak/
 *.swo
 *~
 
-# Environment files - CRITICAL: Never commit these!
+# Environment files
 .env
 .env.local
-.env.production
 .env.*.local
-!.env.production.example
 
 # Database
 *.sqlite3
@@ -51,9 +49,18 @@ db.sqlite3
 *.log
 logs/
 
-# Static and media files
-staticfiles/
-media/
+# Git
+.git/
+.gitignore
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Documentation
+README.md
+docs/
 
 # Testing
 .pytest_cache/
@@ -66,12 +73,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Backup files
-*.bak
-*.backup
+# Media files (optional - uncomment if you don't want to include uploads)
+# media/
 
-# Temporary files
-*.tmp
-*.temp
-
-*.md
+# Static files (will be collected during build)
+# staticfiles/
