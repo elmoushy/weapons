@@ -1,6 +1,7 @@
 # Core Django packages
 Django==5.2.4
 djangorestframework==3.16.0
+django-extensions
 
 # Timezone handling
 pytz==2024.1
