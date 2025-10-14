@@ -3,6 +3,9 @@ Django==5.2.4
 djangorestframework==3.16.0
 django-extensions
 
+# WSGI server for production
+gunicorn==21.2.0
+
 # Timezone handling
 pytz==2024.1
 
