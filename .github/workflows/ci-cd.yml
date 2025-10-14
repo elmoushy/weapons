@@ -11,7 +11,7 @@ on:
       - develop
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: '3.10'  # Changed from 3.11 to 3.10
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -124,9 +124,9 @@ jobs:
           DJANGO_SETTINGS_MODULE: weaponpowercloud_backend.settings
         run: |
           python manage.py test --keepdb || true
-    
+  
 
-    # Build and push Docker image to GHCR
+  # Build and push Docker image to GHCR
   build:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
@@ -163,7 +163,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.prod
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -186,10 +186,10 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: ${{ vars.EC2_PORT || 22 }}
           script: |
-            cd /home/ec2-user
+            cd /home/ec2-user/weapons || cd /home/ubuntu/weapons
             echo "Logging into GHCR..."
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             echo "Pulling latest image..."
-            docker compose pull
-            docker compose up -d --remove-orphans
+            docker-compose -f docker-compose.prod.yml pull
+            docker-compose -f docker-compose.prod.yml up -d --remove-orphans
             echo "Deployment completed successfully!"
