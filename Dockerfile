@@ -1,24 +1,35 @@
+# --------------------------------------------
+# ✅ Final fixed Dockerfile for Django + Gunicorn
+# --------------------------------------------
 
-FROM python:3.10-slim
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# Install system dependencies for Oracle
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libaio1 \
-    wget \
-    unzip \
-    curl \
+# 🧩 Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
+# 🧩 Install Python packages
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m ensurepip --upgrade && \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt && \
+    pip install gunicorn
 
-# Copy project files
+# 🧩 Copy the Django project
 COPY . .
+
+# 🧩 Collect static files
+RUN python manage.py collectstatic --noinput || true
 
 EXPOSE 8000
 
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# 🧩 Start Gunicorn
+CMD ["bash", "-c", "python manage.py migrate && exec gunicorn weaponpowercloud_backend.wsgi:application --bind 0.0.0.0:8000 --workers 3"]
